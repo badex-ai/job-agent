@@ -1,0 +1,103 @@
+
+# ===========================================
+# Job Agent - .gitignore
+# ===========================================
+
+# ----- Personal Data (MUST NOT be committed) -----
+# Personal notes and documentation
+txt/
+v.txt
+v2.txt
+*.pdf
+
+# Personal CVs and resumes
+data/cv*.txt
+
+# Personal profile configuration
+config/_profile.yml
+
+# Job databases (contains personal job search data)
+data/jobs.db
+data/jobs_backup_*.db
+data/*.db
+
+# Batch processing checkpoints
+data/checkpoints/
+
+# ----- Environment & Secrets -----
+.env
+.env.local
+.env.*.local
+*.pem
+*.key
+credentials.json
+
+# ----- Python -----
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+build/
+develop-eggs/
+dist/
+downloads/
+eggs/
+.eggs/
+lib/
+lib64/
+parts/
+sdist/
+var/
+wheels/
+*.egg-info/
+.installed.cfg
+*.egg
+
+# Virtual environments
+.venv/
+venv/
+ENV/
+env/
+.python-version
+
+# ----- IDE & Editor -----
+.idea/
+.vscode/
+*.swp
+*.swo
+*~
+.project
+.pydevproject
+.settings/
+*.sublime-workspace
+*.sublime-project
+
+# ----- Claude Code -----
+.claude/
+
+# ----- OS Files -----
+.DS_Store
+.DS_Store?
+._*
+.Spotlight-V100
+.Trashes
+ehthumbs.db
+Thumbs.db
+
+# ----- Logs & Debug -----
+*.log
+logs/
+debug/
+
+# ----- Testing -----
+.pytest_cache/
+.coverage
+htmlcov/
+.tox/
+.nox/
+
+# ----- Misc -----
+*.bak
+*.tmp
+*.temp
