@@ -26,7 +26,7 @@ profile = ProfileManager()
 
 def detect_job_type(job_title: str, job_description: str) -> str:
     """Detect job type based on title and description keywords."""
-    text = (job_title + " " + job_description).lower()
+    text = ((job_title or "") + " " + (job_description or "")).lower()
     
     for job_type, config in JOB_TYPES.items():
         for keyword in config["keywords"]:

@@ -13,6 +13,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 import logging
 import time
 import json
+import threading
 from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
@@ -39,6 +40,7 @@ class BatchProcessor:
         self.checkpoint_file = CHECKPOINT_DIR / f"batch_{self.batch_id}.json"
         self.processed = set()
         self.results = {}
+        self._lock = threading.Lock()  # Protect concurrent access to results/processed
         self.load_checkpoint()
     
     def load_checkpoint(self):
@@ -54,10 +56,15 @@ class BatchProcessor:
     
     def save_checkpoint(self):
         """Save progress to checkpoint."""
+        # Snapshot the dict/set under lock to avoid race condition
+        with self._lock:
+            processed_snapshot = list(self.processed)
+            results_snapshot = dict(self.results)
+
         data = {
             "batch_id": self.batch_id,
-            "processed": list(self.processed),
-            "results": self.results,
+            "processed": processed_snapshot,
+            "results": results_snapshot,
             "timestamp": datetime.now().isoformat(),
         }
         with open(self.checkpoint_file, "w") as f:
@@ -66,33 +73,35 @@ class BatchProcessor:
     def process_job_wrapper(self, job: Job) -> tuple:
         """Wrapper to handle individual job processing."""
         try:
-            if job.id in self.processed:
-                logger.debug(f"Skipping already processed: {job.id}")
-                return job.id, True, "skipped"
+            with self._lock:
+                if job.id in self.processed:
+                    logger.debug(f"Skipping already processed: {job.id}")
+                    return job.id, True, "skipped"
             
-            # Convert SQLAlchemy object to dict
+            # Convert SQLAlchemy object to dict (guard against None values)
             job_dict = {
                 "id": job.id,
-                "title": job.title,
-                "company": job.company,
-                "description": job.description,
-                "location": job.location,
-                "apply_link": job.apply_link,
-                "job_url": job.job_url,
+                "title": job.title or "",
+                "company": job.company or "",
+                "description": job.description or "",
+                "location": job.location or "",
+                "apply_link": job.apply_link or "",
+                "job_url": job.job_url or "",
                 "date_posted": job.date_posted,
-                "source": job.source,
+                "source": job.source or "",
             }
-            
-            logger.info(f"Processing: {job.title} @ {job.company}")
+
+            logger.info(f"Processing: {job_dict['title']} @ {job_dict['company']}")
             result = analyse_job(job_dict)
 
             # Extract contact info (0 tokens, regex only)
             contacts = extract_contacts(job_dict)
             result.update(contacts)
 
-            # Store result
-            self.results[job.id] = result
-            self.processed.add(job.id)
+            # Store result (protected by lock for thread safety)
+            with self._lock:
+                self.results[job.id] = result
+                self.processed.add(job.id)
             
             score = result.get("overall_score", 0)
             action = result.get("recommended_action", "SKIP")
@@ -101,7 +110,8 @@ class BatchProcessor:
         
         except Exception as e:
             logger.error(f"Error processing job {job.id}: {e}")
-            self.processed.add(job.id)
+            with self._lock:
+                self.processed.add(job.id)
             return job.id, False, str(e)
     
     def process_batch(self, jobs: list[Job], save_interval: int = 5):
