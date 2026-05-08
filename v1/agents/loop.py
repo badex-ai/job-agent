@@ -11,14 +11,14 @@ from datetime import datetime
 from apscheduler.schedulers.blocking import BlockingScheduler
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
-from config import SCRAPE_INTERVAL_MINUTES, MIN_MATCH_SCORE
-from scraper.job_scraper import run_scrape
-from analyzer.cv_matcher import analyse_batch
-from agents.batch_processor import BatchProcessor
-from outreach.email_sender import send_job_application
-from database.models import get_session, Job, init_db
+from shared.config import SCRAPE_INTERVAL_MINUTES, MIN_MATCH_SCORE
+from shared.scraper.job_scraper import run_scrape
+from v1.analyzer.cv_matcher import analyse_batch
+from v1.agents.batch_processor import BatchProcessor
+from v1.outreach.email_sender import send_job_application
+from shared.database.models import get_session, Job, init_db
 
 logging.basicConfig(
     level=logging.INFO,

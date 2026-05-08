@@ -10,8 +10,8 @@ from email.mime.multipart import MIMEMultipart
 from datetime import datetime
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from config import GMAIL_ADDRESS, GMAIL_APP_PASSWORD
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from shared.config import GMAIL_ADDRESS, GMAIL_APP_PASSWORD
 
 logger = logging.getLogger(__name__)
 

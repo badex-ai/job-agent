@@ -9,9 +9,9 @@ This script:
 """
 import sys
 import os
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
-from database.models import get_engine, Job
+from shared.database.models import get_engine, Job
 from sqlalchemy import text, inspect
 from datetime import datetime
 from pathlib import Path

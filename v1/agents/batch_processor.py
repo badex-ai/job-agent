@@ -8,7 +8,8 @@ Features:
 """
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+# Add project root to path for imports
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 import logging
 import time
@@ -18,10 +19,10 @@ from concurrent.futures import ThreadPoolExecutor, as_completed
 from datetime import datetime
 from pathlib import Path
 from sqlalchemy.orm import sessionmaker
-from database.models import Job, get_engine
-from analyzer.cv_matcher import analyse_job
-from scraper.contact_extractor import extract_contacts
-from config import MIN_MATCH_SCORE
+from shared.database.models import Job, get_engine
+from v1.analyzer.cv_matcher import analyse_job
+from shared.scraper.contact_extractor import extract_contacts
+from shared.config import MIN_MATCH_SCORE
 
 logger = logging.getLogger(__name__)
 engine = get_engine()

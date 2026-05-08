@@ -4,7 +4,7 @@ Browse jobs with scores, expand details, mark as reviewed, feedback loop.
 """
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 from rich.console import Console
 from rich.table import Table
@@ -15,8 +15,8 @@ from rich.align import Align
 from rich.text import Text
 from rich.layout import Layout
 from sqlalchemy.orm import sessionmaker
-from database.models import Job, get_engine
-from analyzer.cv_matcher import generate_report
+from shared.database.models import Job, get_engine
+from v1.analyzer.cv_matcher import generate_report
 import json
 
 console = Console()

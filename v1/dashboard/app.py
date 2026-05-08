@@ -9,8 +9,8 @@ import subprocess
 from datetime import datetime
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from database.models import get_session, Job
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from shared.database.models import get_session, Job
 
 st.set_page_config(
     page_title="Job Agent",

@@ -15,9 +15,9 @@ import sys
 import os
 import subprocess
 import platform
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from config import ANTHROPIC_API_KEY, CLAUDE_MODEL, CV_PATH, MIN_MATCH_SCORE, JOB_TYPES
-from config.profile_manager import ProfileManager
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from shared.config import ANTHROPIC_API_KEY, CLAUDE_MODEL, CV_PATH, MIN_MATCH_SCORE, JOB_TYPES
+from shared.config.profile_manager import ProfileManager
 
 logger = logging.getLogger(__name__)
 client = anthropic.Anthropic(api_key=ANTHROPIC_API_KEY)

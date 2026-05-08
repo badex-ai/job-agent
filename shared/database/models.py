@@ -6,8 +6,8 @@ from sqlalchemy.orm import declarative_base, sessionmaker
 from datetime import datetime
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from config import DB_PATH
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from shared.config import DB_PATH
 
 Base = declarative_base()
 

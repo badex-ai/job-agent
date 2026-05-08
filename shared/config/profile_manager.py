@@ -9,8 +9,11 @@ from typing import Dict, Any, Optional, List
 
 class ProfileManager:
     """Load and access user profile."""
-    
-    def __init__(self, profile_path: str = "config/_profile.yml"):
+
+    def __init__(self, profile_path: str = None):
+        if profile_path is None:
+            # Default path relative to this file's location
+            profile_path = Path(__file__).parent / "_profile.yml"
         self.profile_path = Path(profile_path)
         self.profile = self._load_profile()
     

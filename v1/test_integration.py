@@ -5,7 +5,7 @@ Run this to check syntax, imports, and basic functionality.
 """
 import sys
 import os
-sys.path.insert(0, os.path.dirname(__file__))
+sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
 
 import json
 from datetime import datetime
@@ -14,16 +14,16 @@ def test_imports():
     """Test that all critical modules import successfully."""
     print("Testing imports...")
     try:
-        from database.models import Job, get_engine, get_session, init_db
+        from shared.database.models import Job, get_engine, get_session, init_db
         print("  ✓ Database models")
-        
-        from analyzer.cv_matcher import analyse_job, generate_report, play_alert_sound
+
+        from v1.analyzer.cv_matcher import analyse_job, generate_report, play_alert_sound
         print("  ✓ CV matcher (Phase 1)")
-        
-        from agents.batch_processor import BatchProcessor
+
+        from v1.agents.batch_processor import BatchProcessor
         print("  ✓ Batch processor (Phase 3)")
-        
-        from config.profile_manager import ProfileManager
+
+        from shared.config.profile_manager import ProfileManager
         print("  ✓ Profile manager")
         
         try:
@@ -43,7 +43,7 @@ def test_profile_manager():
     """Test profile manager functionality."""
     print("Testing profile manager...")
     try:
-        from config.profile_manager import ProfileManager
+        from shared.config.profile_manager import ProfileManager
         pm = ProfileManager()
         
         if pm.is_empty():
@@ -66,8 +66,8 @@ def test_cv_matcher():
     """Test CV matcher evaluation."""
     print("Testing CV matcher...")
     try:
-        from analyzer.cv_matcher import analyse_job
-        from config import CV_PATH
+        from v1.analyzer.cv_matcher import analyse_job
+        from shared.config import CV_PATH
         
         # Check if CV exists
         if not os.path.exists(CV_PATH):
@@ -97,7 +97,7 @@ def test_batch_processor():
     """Test batch processor setup."""
     print("Testing batch processor...")
     try:
-        from agents.batch_processor import BatchProcessor, CHECKPOINT_DIR
+        from v1.agents.batch_processor import BatchProcessor, CHECKPOINT_DIR
         
         # Check checkpoint directory
         if not CHECKPOINT_DIR.exists():
@@ -122,7 +122,7 @@ def test_database():
     """Test database functionality."""
     print("Testing database...")
     try:
-        from database.models import get_engine, get_session, init_db, Job
+        from shared.database.models import get_engine, get_session, init_db, Job
         
         # Initialize database
         init_db()

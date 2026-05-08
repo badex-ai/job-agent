@@ -14,8 +14,8 @@ from datetime import datetime
 from typing import List, Dict
 import sys
 import os
-sys.path.insert(0, os.path.dirname(os.path.dirname(__file__)))
-from config import LINKEDIN_GUEST_API, LINKEDIN_FILTERS, SEARCH_KEYWORDS
+sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
+from shared.config import LINKEDIN_GUEST_API, LINKEDIN_FILTERS, SEARCH_KEYWORDS
 
 logger = logging.getLogger(__name__)
 

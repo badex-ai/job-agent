@@ -19,9 +19,10 @@ from typing import Optional, List, Dict, Any
 
 class ProfileBuilder:
     """Interactive profile questionnaire."""
-    
+
     def __init__(self):
-        self.profile_path = Path("config/_profile.yml")
+        # Profile path relative to project root
+        self.profile_path = Path(__file__).parent.parent / "shared/config/_profile.yml"
         self.profile_path.parent.mkdir(exist_ok=True)
         self.responses = {}
         
