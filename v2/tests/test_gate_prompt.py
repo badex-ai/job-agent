@@ -91,12 +91,37 @@ def test_includes_three_verdict_literals(prompt):
 
 def test_uncertainty_routes_to_surface(prompt):
     lowered = prompt.lower()
-    assert "uncertainty" in lowered or "in doubt" in lowered
-    assert "may not skip on a guess" in prompt
+    assert "uncertainty" in lowered or "unsure" in lowered or "not sure" in lowered
+    assert "when unsure, surface" in prompt.lower() or "-> surface" in prompt
 
 
-def test_includes_steel_man_instruction(prompt):
-    assert "OPPOSITE" in prompt
+def test_two_phase_procedure_checks_hard_gates_first(prompt):
+    # the core fix: S1/S4/S5 are an explicit first pass before role judgment
+    assert "PHASE 1" in prompt and "PHASE 2" in prompt
+    p1 = prompt.index("PHASE 1")
+    p2 = prompt.index("PHASE 2")
+    assert p1 < p2, "phase 1 (hard gates) must come before phase 2 (judgment)"
+    # S1 must be named in the phase-1 hard-gate checklist
+    assert prompt.index("S1") < p2
+
+
+def test_requires_evidence_quote_to_skip(prompt):
+    # replaces the steel-man: must quote disqualifying text or surface
+    lowered = prompt.lower()
+    assert "quote" in lowered
+    assert "cannot quote" in lowered or "do not skip" in lowered or \
+        "does not fire" in lowered
+
+
+def test_seniority_senior_lead_not_a_skip(prompt):
+    # the S6 misfire fix must be visible in the prompt
+    assert "Senior" in prompt and "Lead" in prompt
+    assert "NOT a skip" in prompt or "not a skip" in prompt.lower()
+
+
+def test_no_open_ended_steel_man(prompt):
+    # the backfiring instruction is gone
+    assert "argue the strongest case for the\nOPPOSITE" not in prompt
     assert "reasoning" in prompt
 
 

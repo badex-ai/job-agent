@@ -83,25 +83,57 @@ def _candidate_block(profile: dict) -> str:
 def _verdict_block() -> str:
     return (
         "## Your three verdicts\n"
-        "- `skip` — ONLY when a rubric rule S1–S6 clearly applies. Name the rule\n"
-        "  (e.g. 'S1', 'S2') in `tags`. You may not skip on a guess.\n"
+        "- `skip` — ONLY when a rubric rule S1-S6 clearly applies AND you can\n"
+        "  quote the disqualifying text. Name the rule (e.g. 'S1') in `tags`.\n"
         "- `surface` — the DEFAULT and the required answer under ANY uncertainty.\n"
-        "  Ambiguous remote scope, learnable gaps, seniority stretch, secondary-\n"
-        "  stack mismatch, anything you are not sure about → surface, not skip.\n"
-        "- `surface_priority` — a clean fit against the APPLY profile (§3): a\n"
-        "  DevOps/platform/K8s/cloud-infra IC role, or full-stack/backend JS/TS-\n"
-        "  Node-React, with no flags."
+        "  Ambiguous remote scope, learnable gaps, seniority (Senior/Sr./Lead),\n"
+        "  secondary-stack mismatch, anything you are not sure about -> surface.\n"
+        "- `surface_priority` — a clean fit against the APPLY profile: a DevOps/\n"
+        "  platform/K8s/cloud-infra IC role, or full-stack/backend JS/TS-Node-\n"
+        "  React, with no flags."
     )
 
 
-def _steel_man_block() -> str:
+def _procedure_block() -> str:
     return (
-        "## How to reason (steel-man, in this order)\n"
-        "In the `reasoning` field, FIRST argue the strongest case for the\n"
-        "OPPOSITE of the verdict you are leaning toward: before a skip, say why\n"
-        "this job might be worth surfacing; before surfacing, say why it might be\n"
-        "a trap. THEN commit to a verdict. If the opposite case is not decisively\n"
-        "defeated, the verdict is `surface`."
+        "## How to decide (do these in order, do not skip phase 1)\n"
+        "PHASE 1 - objective hard gates. BEFORE you assess role fit, check the\n"
+        "DESCRIPTION TEXT for these facts only:\n"
+        "  (1) S1: does the description explicitly state that applicants MUST be\n"
+        "      located in, or authorized to work in, a specific country/region\n"
+        "      that does NOT include the candidate's country or 'worldwide'? Fire S1 only on an\n"
+        "      explicit exclusionary requirement, not on a mention of a place.\n"
+        "  (2) S4: explicit security clearance or visa demanded? -> skip, tag S4.\n"
+        "  (3) S5: unpaid / no stipend / India-based? -> skip, tag S5.\n"
+        "If any phase-1 gate fires, STOP and skip. Do not let an interesting\n"
+        "role talk you out of a hard eligibility failure.\n"
+        "\n"
+        "WHAT IS NOT AN S1 RESTRICTION (surface these, do NOT skip):\n"
+        "  - the 'Location metadata:' line above is NOT evidence of restriction;\n"
+        "    only explicit exclusion text inside the description counts.\n"
+        "  - a company being 'based in' a place, a city in the title, an office\n"
+        "    location, 'remote', '100% remote', or a time-zone preference.\n"
+        "  - a region named WITHOUT an explicit 'must be located/authorized'\n"
+        "    requirement -> that is ambiguous, which means surface, not skip.\n"
+        "\n"
+        "PHASE 2 - role judgment (only if all phase-1 gates pass). Assess stack\n"
+        "(S2), field/role-type (S3), and Staff/Principal level (S6). These are\n"
+        "SURFACE-BIASED: skip only on a clear, quotable match; when unsure,\n"
+        "surface. Senior/Sr./Lead is NOT a skip. JS/TS/React/Next/Node/Python/\n"
+        "Kubernetes are THE CANDIDATE'S stack - never skip those as wrong-stack.\n"
+        "\n"
+        "## Required reasoning format\n"
+        "Write `reasoning` as exactly three parts, in this order:\n"
+        "  1. 'Phase 1:' - state the result of each hard gate (pass/fire).\n"
+        "  2. 'Disqualifying rule:' - the single rule that fires, or 'none'.\n"
+        "  3. 'Evidence:' - copy a SHORT EXACT SUBSTRING of THIS posting's\n"
+        "     description that proves the firing rule. It must be text that\n"
+        "     actually appears in the description above, word for word. Do NOT\n"
+        "     write an example phrase, do NOT paraphrase, do NOT invent text. If\n"
+        "     no real substring proves the rule, the rule does not fire and the\n"
+        "     verdict is surface.\n"
+        "Then set `verdict`. This replaces open-ended deliberation: cite a rule\n"
+        "with a real quote from THIS posting, or surface."
     )
 
 
@@ -117,6 +149,6 @@ def build_system_prompt(
         _candidate_block(profile),
         "## Eligibility rubric (derived from 200 hand-labeled jobs)\n" + rubric,
         _verdict_block(),
-        _steel_man_block(),
+        _procedure_block(),
     ]
     return "\n\n".join(blocks)
