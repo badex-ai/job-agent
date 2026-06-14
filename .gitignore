@@ -10,19 +10,14 @@ v.txt
 v2.txt
 *.pdf
 
-# Personal CVs and resumes
-data/cv*.txt
-
-# Personal profile configuration
+# Personal profile configuration (real path is shared/config/)
 config/_profile.yml
+shared/config/_profile.yml
 
-# Job databases (contains personal job search data)
-data/jobs.db
-data/jobs_backup_*.db
-data/*.db
-
-# Batch processing checkpoints
-data/checkpoints/
+# All personal job-search data: scraped postings, CVs, hand-labels, the DB,
+# and the labeling working files. labels.json is ground truth but personal —
+# back it up privately, never push it.
+data/
 
 # ----- Environment & Secrets -----
 .env
