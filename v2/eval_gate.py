@@ -28,12 +28,14 @@ import json
 import re
 import sys
 import time
+import urllib.request
 from pathlib import Path
 
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from v2.gate_prompt import build_system_prompt
-from v2.qwen_gate import MAX_DESCRIPTION_CHARS, GateError, gate_job
+from v2.qwen_gate import (DEFAULT_MODEL, MAX_DESCRIPTION_CHARS, GateError,
+                          gate_job, ollama_url)
 
 REPO_ROOT = Path(__file__).resolve().parent.parent
 LABELS_PATH = REPO_ROOT / "data" / "labels.json"
@@ -73,10 +75,27 @@ def extract_evidence(reasoning: str) -> str | None:
     return quote or None
 
 
-def verify_evidence(verdict: str, reasoning: str, description: str) -> tuple[str, str | None]:
-    """Guard against fabricated quotes. If the model skipped but its Evidence
-    quote is NOT an actual substring of the description, the skip is invalid
-    -> downgrade to surface. Returns (effective_verdict, reason_if_downgraded).
+# S1 (geographic eligibility) is the only rule whose evidence must EXCLUDE,
+# not merely MENTION, a place. The live n=100 run (2026-06-15) showed the 7B
+# firing S1 on a bare 'Evidence: Remote' or 'Evidence: United States' — a real
+# substring, so the substring check passed, but a location mention is surface
+# per rubric S1's boundary, not a skip. An exclusionary S1 quote must carry one
+# of these markers; without one, the quote does not prove restriction.
+S1_EXCLUSION_RE = re.compile(
+    r"\bonly\b|\bmust be\b|authoriz|\beligib|citizens?\b|\brequired to (be|reside|live)\b|"
+    r"\bbased in\b|\blocated in\b|\bno sponsor|work authoriz|right to work\b",
+    re.IGNORECASE)
+
+
+def verify_evidence(
+    verdict: str, reasoning: str, description: str, tags: list[str] | None = None
+) -> tuple[str, str | None]:
+    """Guard against fabricated AND non-exclusionary quotes. If the model
+    skipped but its Evidence quote is NOT an actual substring of the
+    description, the skip is invalid -> downgrade to surface. Additionally,
+    a skip tagged S1 (geographic eligibility) must quote text that actually
+    EXCLUDES — a bare place name or 'Remote' is a mention, not a restriction,
+    and is downgraded. Returns (effective_verdict, reason_if_downgraded).
 
     A short quote (<8 chars) is too weak to verify reliably, so we don't
     downgrade on it; we only reject quotes that are substantive AND absent."""
@@ -85,17 +104,34 @@ def verify_evidence(verdict: str, reasoning: str, description: str) -> tuple[str
     quote = extract_evidence(reasoning)
     if quote is None:
         return "surface", "skip with no Evidence quote"
+    # The S1-exclusion veto applies ONLY when S1 is the SOLE basis for the skip.
+    # Live 0-99 (2026-06-15) showed the 7B defaulting to an S1 tag for wrong-
+    # field/wrong-stack skips it actually judged on other grounds — vetoing
+    # those on the geographic check destroyed correct skips. If the model also
+    # cited a non-geographic rule (S2/S3/S4/S5/S6), the skip stands on that rule
+    # and the S1 quote-quality check must not override it.
+    other_rules = {"S2", "S3", "S4", "S5", "S6"}
+    s1_is_sole_basis = bool(tags and "S1" in tags
+                            and not (set(tags) & other_rules))
+    # When S1 is the sole basis, it MUST quote exclusionary language regardless
+    # of length — a bare 'Remote' (6 chars) or 'US' is exactly the mention-not-
+    # restriction case this check exists to catch, and it must run BEFORE the
+    # short-quote leniency below.
+    if s1_is_sole_basis and not S1_EXCLUSION_RE.search(quote):
+        return "surface", f"S1 quote mentions a place but states no exclusion: {quote[:80]!r}"
     if len(quote) < 8:
-        return verdict, None  # too short to verify; let it stand
+        return verdict, None  # too short to verify substring; let it stand
     # truncate to the same window the model actually saw
     desc = description[:MAX_DESCRIPTION_CHARS]
     if _norm(quote) in _norm(desc):
-        return verdict, None
-    # try a partial: first 40 normalized chars of the quote (model may pad)
-    head = _norm(quote)[:40]
-    if head and head in _norm(desc):
-        return verdict, None
-    return "surface", f"fabricated/unverifiable evidence: {quote[:80]!r}"
+        substr_ok = True
+    else:
+        # try a partial: first 40 normalized chars of the quote (model may pad)
+        head = _norm(quote)[:40]
+        substr_ok = bool(head and head in _norm(desc))
+    if not substr_ok:
+        return "surface", f"fabricated/unverifiable evidence: {quote[:80]!r}"
+    return verdict, None
 
 
 def is_surface(verdict: str) -> bool:
@@ -129,32 +165,77 @@ def _gate_with_retry(job, system_prompt, kw, retries=2, backoff=3.0):
     raise last
 
 
-def evaluate(jobs: list[dict], system_prompt: str, transport=None) -> dict:
+class TunnelDown(Exception):
+    """Raised when consecutive transport errors indicate the Ollama tunnel
+    died mid-run — abort fast instead of grinding timeouts on every remaining
+    job. Carries the partial results gathered so far for inspection."""
+
+    def __init__(self, msg, partial):
+        super().__init__(msg)
+        self.partial = partial
+
+
+def evaluate(jobs: list[dict], system_prompt: str, transport=None,
+             on_progress=None, abort_after_consecutive_errors=None,
+             model=None) -> dict:
     """Run the gate over jobs; return a metrics dict (every count has its n).
 
     Per-job failures (malformed output OR transport errors that survive
     retries) are recorded and skipped — one network blip never discards the
-    jobs already completed."""
+    jobs already completed.
+
+    `on_progress(done, total, info)` is called after each job (default None =
+    silent, so the function stays pure for tests). `info` is a dict with the
+    job title, the effective verdict (or an 'error' key), and the job's
+    latency in seconds — enough to render a live progress line.
+
+    `abort_after_consecutive_errors` (default None = off): if this many
+    transport errors occur back-to-back, raise TunnelDown — the tunnel has
+    dropped and the rest of the batch would just be doomed timeouts. A
+    successful job resets the streak; malformed output (GateError) is the
+    model's fault, not the tunnel's, so it does NOT count toward the breaker."""
     kw = {"transport": transport} if transport is not None else {}
+    if model is not None:
+        kw["model"] = model
     results = []
     errors = []
     latencies = []
-    for j in jobs:
+    total = len(jobs)
+    consecutive_errors = 0
+
+    def _tick(done, title, info):
+        if on_progress is not None:
+            on_progress(done, total, {"title": title, **info})
+
+    for i, j in enumerate(jobs, 1):
         t0 = time.time()
         try:
             v = _gate_with_retry(j, system_prompt, kw)
         except GateError as e:
             errors.append({"id": j.get("id"), "title": j.get("title"),
                            "error": f"malformed: {e}"})
+            _tick(i, j.get("title"), {"error": "malformed", "dt": time.time() - t0})
             continue
         except Exception as e:
             errors.append({"id": j.get("id"), "title": j.get("title"),
                            "error": f"transport: {type(e).__name__}: {e}"})
+            _tick(i, j.get("title"), {"error": type(e).__name__,
+                                      "dt": time.time() - t0})
+            consecutive_errors += 1
+            if (abort_after_consecutive_errors is not None
+                    and consecutive_errors >= abort_after_consecutive_errors):
+                raise TunnelDown(
+                    f"{consecutive_errors} consecutive transport errors at "
+                    f"job {i}/{total} — tunnel down, aborting",
+                    partial=results)
             continue
-        latencies.append(time.time() - t0)
+        consecutive_errors = 0
+        dt = time.time() - t0
+        latencies.append(dt)
         raw_verdict = v["verdict"]
         eff_verdict, downgrade = verify_evidence(
-            raw_verdict, v.get("reasoning", ""), j.get("description", ""))
+            raw_verdict, v.get("reasoning", ""), j.get("description", ""),
+            tags=v.get("tags", []))
         results.append({
             "id": j.get("id"), "title": j.get("title"),
             "label": j["label"], "verdict": eff_verdict,
@@ -164,6 +245,8 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None) -> dict:
             "reasoning": v.get("reasoning", ""),
             "notes": (j.get("notes") or "")[:120],
         })
+        _tick(i, j.get("title"), {"verdict": eff_verdict,
+                                  "label": j.get("label"), "dt": dt})
 
     n = len(results)
     # confusion on the binary skip-vs-surface axis
@@ -190,6 +273,10 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None) -> dict:
     downgraded = [r for r in results if r.get("downgraded")]
     return {
         "n": n,
+        # full per-job records (incl. the model's reasoning) so a run is
+        # self-diagnosing — no live re-run needed to inspect why a job went
+        # the way it did (closes the T3(f) harness gap).
+        "results": results,
         "errors": errors,
         "n_errors": len(errors),
         "n_downgraded_bad_evidence": len(downgraded),
@@ -215,6 +302,65 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None) -> dict:
     }
 
 
+_VERDICT_MARK = {"skip": "SKIP", "surface": "surf", "surface_priority": "SURF+"}
+
+
+def _make_progress_printer(stream=sys.stderr):
+    """Return an on_progress callback that renders a live line.
+
+    On a TTY it rewrites one line in place (bar + percent + ETA + last
+    verdict); piped to a file it writes one line per job so a background
+    run's log stays greppable / tail-able. Carries running latency so a
+    stall is visible the moment a job runs slow."""
+    start = time.time()
+    is_tty = hasattr(stream, "isatty") and stream.isatty()
+
+    def on_progress(done, total, info):
+        elapsed = time.time() - start
+        rate = elapsed / done if done else 0
+        eta = rate * (total - done)
+        pct_done = 100 * done / total if total else 100
+        title = (info.get("title") or "")[:32]
+        if "error" in info:
+            mark = f"ERR:{info['error']}"
+        else:
+            mark = _VERDICT_MARK.get(info.get("verdict"), info.get("verdict", "?"))
+        dt = info.get("dt", 0)
+        if is_tty:
+            width = 24
+            filled = int(width * done / total) if total else width
+            bar = "█" * filled + "·" * (width - filled)
+            line = (f"\r[{bar}] {pct_done:5.1f}%  {done}/{total}  "
+                    f"{dt:4.1f}s  ETA {eta:4.0f}s  {mark:<5} {title}")
+            stream.write(line.ljust(96))
+            if done == total:
+                stream.write("\n")
+        else:
+            stream.write(f"  {done:>3}/{total} ({pct_done:5.1f}%)  {dt:4.1f}s  "
+                         f"ETA {eta:4.0f}s  {mark:<5} {title}\n")
+        stream.flush()
+
+    return on_progress
+
+
+def preflight(probes=3, timeout=4.0) -> tuple[bool, str]:
+    """Probe Ollama before a run so a dead tunnel fails in seconds, not after
+    a multi-minute hang. Returns (ok, message). One success is enough — we are
+    checking reachability, not stability."""
+    url = f"{ollama_url()}/api/tags"
+    last = ""
+    for attempt in range(1, probes + 1):
+        try:
+            req = urllib.request.Request(url, method="GET")
+            with urllib.request.urlopen(req, timeout=timeout) as resp:
+                if resp.status == 200:
+                    return True, f"Ollama reachable at {ollama_url()}"
+                last = f"HTTP {resp.status}"
+        except Exception as e:  # URLError/timeout/etc.
+            last = f"{type(e).__name__}: {e}"
+    return False, f"Ollama unreachable at {ollama_url()} after {probes} probes ({last})"
+
+
 def main(argv=None):
     ap = argparse.ArgumentParser(description="Eval the Qwen gate vs hand labels")
     ap.add_argument("--limit", type=int, default=None,
@@ -223,6 +369,14 @@ def main(argv=None):
                     help="skip the first N jobs (for held-out eval, e.g. 100)")
     ap.add_argument("--stub-model", action="store_true",
                     help="deterministic fake transport, no network")
+    ap.add_argument("--no-progress", action="store_true",
+                    help="suppress the per-job progress line")
+    ap.add_argument("--abort-after", type=int, default=5,
+                    help="abort if this many transport errors occur in a row "
+                         "(tunnel died mid-run); 0 disables the breaker")
+    ap.add_argument("--model", default=None,
+                    help="Ollama model tag (default: qwen_gate's qwen2.5:7b). "
+                         "e.g. --model qwen2.5:14b for the single-variable test")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = ap.parse_args(argv)
 
@@ -235,11 +389,34 @@ def main(argv=None):
     transport = stub_transport if args.stub_model else None
 
     mode = "STUB" if args.stub_model else "LIVE Qwen"
-    print(f"[{mode}] evaluating {len(jobs)} jobs ...", file=sys.stderr)
+
+    # preflight: don't launch a live batch into a dead tunnel (skip for stub).
+    if not args.stub_model:
+        ok, msg = preflight()
+        print(f"[preflight] {msg}", file=sys.stderr)
+        if not ok:
+            print("[preflight] aborting — start ollama / bring up the tunnel "
+                  "and retry.", file=sys.stderr)
+            return 2
+
+    model_label = args.model or "qwen2.5:7b (default)"
+    print(f"[{mode}] evaluating {len(jobs)} jobs "
+          f"(offset {args.offset}, model {model_label}) ...", file=sys.stderr)
+    progress = None if args.no_progress else _make_progress_printer()
+    breaker = args.abort_after if args.abort_after > 0 else None
     t0 = time.time()
-    m = evaluate(jobs, system_prompt, transport=transport)
+    try:
+        m = evaluate(jobs, system_prompt, transport=transport,
+                     on_progress=progress, abort_after_consecutive_errors=breaker,
+                     model=args.model)
+    except TunnelDown as e:
+        print(f"\n[abort] {e}", file=sys.stderr)
+        print(f"[abort] {len(e.partial)} jobs completed before the drop were "
+              f"NOT written (re-run when the tunnel is stable).", file=sys.stderr)
+        return 3
     m["wall_clock_s"] = round(time.time() - t0, 1)
     m["mode"] = mode
+    m["model"] = args.model or DEFAULT_MODEL
 
     args.out.write_text(json.dumps(m, indent=2))
 

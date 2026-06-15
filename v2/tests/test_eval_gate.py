@@ -146,15 +146,18 @@ def test_every_metric_carries_its_n():
 
 def test_tier_slice_attributes_skips_to_cited_rule():
     jobs = make_jobs([("J1", "SKIP"), ("J2", "CONSIDER")])
-    # both get verdict skip with tag == the verdict ("skip"); craft tags via custom transport
+    # both get verdict skip; craft tags via custom transport. Tags are S4/S2 (not
+    # S1) because the clearance token carries no geographic-exclusion keyword and
+    # the S1-only guard would (correctly) downgrade an S1 skip lacking one — this
+    # test is about tier attribution, not S1 semantics.
     def t(url, payload, timeout):
         title_has = lambda s: s in payload["prompt"]
-        tag = "S1" if title_has("J1") else "S2"
+        tag = "S4" if title_has("J1") else "S2"
         return {"response": json.dumps({
             "reasoning": f"Disqualifying rule: {tag}.\nEvidence: '{DISQUALIFYING_TOKEN}'",
             "verdict": "skip", "confidence": 50, "tags": [tag]})}
     m = eval_gate.evaluate(jobs, "sys", transport=t)
-    assert m["tier_slice"]["S1"] == {"n": 1, "correct": 1}  # J1 was a real SKIP
+    assert m["tier_slice"]["S4"] == {"n": 1, "correct": 1}  # J1 was a real SKIP
     assert m["tier_slice"]["S2"] == {"n": 1, "correct": 0}  # J2 was CONSIDER
 
 
@@ -216,6 +219,92 @@ def test_gate_error_is_not_retried(monkeypatch):
     assert calls["n"] == 1  # malformed output is deterministic -> no retry
 
 
+# --- circuit breaker: abort a doomed batch when the tunnel drops -----------
+
+def test_breaker_aborts_after_consecutive_transport_errors(monkeypatch):
+    monkeypatch.setattr(eval_gate.time, "sleep", lambda *_: None)
+    jobs = make_jobs([(f"J{i}", "SKIP") for i in range(10)])
+
+    def always_down(url, payload, timeout):
+        raise TimeoutError("tunnel gone")
+
+    with pytest.raises(eval_gate.TunnelDown) as ei:
+        eval_gate.evaluate(jobs, "sys", transport=always_down,
+                           abort_after_consecutive_errors=3)
+    # aborted at the 3rd error, not after grinding all 10 jobs
+    assert "3 consecutive" in str(ei.value)
+    assert ei.value.partial == []  # no successful jobs before the drop
+
+
+def test_breaker_resets_on_success(monkeypatch):
+    monkeypatch.setattr(eval_gate.time, "sleep", lambda *_: None)
+    # outcome is keyed on the job's unique title, so the per-job retry loop
+    # gives a consistent result within a job (retries don't shuffle a shared
+    # iterator). Jobs J0,J1 fail, J2 succeeds (resets streak), J3,J4 fail,
+    # J5 succeeds — never 3 errors in a row, so the breaker must NOT fire.
+    jobs = make_jobs([(f"J{i}", "SKIP") for i in range(6)])
+    fail = {"J0", "J1", "J3", "J4"}
+
+    def flaky(url, payload, timeout):
+        prompt = payload["prompt"]
+        for name in fail:
+            if name in prompt:
+                raise TimeoutError("drop")
+        return {"response": json.dumps({
+            "reasoning": "Disqualifying rule: S2.\nEvidence: 'requires security clearance'",
+            "verdict": "skip", "confidence": 50, "tags": ["S2"]})}
+
+    m = eval_gate.evaluate(jobs, "sys", transport=flaky,
+                           abort_after_consecutive_errors=3)
+    assert m["n"] == 2  # J2 and J5 survived
+    assert m["n_errors"] == 4
+
+
+def test_breaker_ignores_malformed_output(monkeypatch):
+    # GateError (model's fault) must NOT trip the tunnel breaker
+    monkeypatch.setattr(eval_gate.time, "sleep", lambda *_: None)
+    jobs = make_jobs([(f"J{i}", "SKIP") for i in range(5)])
+
+    def malformed(url, payload, timeout):
+        return {"response": "{ not json"}
+
+    m = eval_gate.evaluate(jobs, "sys", transport=malformed,
+                           abort_after_consecutive_errors=2)
+    assert m["n_errors"] == 5  # ran all 5, breaker never fired on malformed
+
+
+def test_breaker_off_by_default(monkeypatch):
+    monkeypatch.setattr(eval_gate.time, "sleep", lambda *_: None)
+    jobs = make_jobs([(f"J{i}", "SKIP") for i in range(4)])
+
+    def always_down(url, payload, timeout):
+        raise TimeoutError("down")
+
+    # default abort_after_consecutive_errors=None -> tolerate all, no raise
+    m = eval_gate.evaluate(jobs, "sys", transport=always_down)
+    assert m["n_errors"] == 4
+
+
+# --- preflight reachability ------------------------------------------------
+
+def test_preflight_ok_when_reachable(monkeypatch):
+    class Resp:
+        status = 200
+        def __enter__(self): return self
+        def __exit__(self, *a): return False
+    monkeypatch.setattr(eval_gate.urllib.request, "urlopen", lambda *a, **k: Resp())
+    ok, msg = eval_gate.preflight(probes=1)
+    assert ok and "reachable" in msg
+
+
+def test_preflight_fails_when_unreachable(monkeypatch):
+    def boom(*a, **k):
+        raise TimeoutError("no route")
+    monkeypatch.setattr(eval_gate.urllib.request, "urlopen", boom)
+    ok, msg = eval_gate.preflight(probes=2)
+    assert not ok and "unreachable" in msg
+
+
 # --- evidence-quote guard (the hallucinated-quote fix) ---------------------
 
 def test_extract_evidence_pulls_quote():
@@ -242,6 +331,68 @@ def test_guard_keeps_real_quote():
     eff, why = eval_gate.verify_evidence("skip", reasoning, desc)
     assert eff == "skip"
     assert why is None
+
+
+def test_s1_guard_downgrades_bare_place_mention():
+    # live n=100 (2026-06-15): the 7B fired S1 quoting bare 'United States' /
+    # 'Remote' — a real substring but a mention, not an exclusion. Buried APPLYs.
+    reasoning = "Phase 1: S1 fired.\nDisqualifying rule: S1.\nEvidence: 'United States'"
+    desc = "Backend Developer. Remote. We hire across the United States and beyond."
+    eff, why = eval_gate.verify_evidence("skip", reasoning, desc, tags=["S1"])
+    assert eff == "surface"
+    assert why and "no exclusion" in why
+
+
+def test_s1_guard_downgrades_bare_remote():
+    reasoning = "Disqualifying rule: S1.\nEvidence: 'Location: Remote'"
+    desc = "Platform Engineer. Location: Remote. Kubernetes, Terraform, AWS."
+    eff, why = eval_gate.verify_evidence("skip", reasoning, desc, tags=["S1"])
+    assert eff == "surface" and why is not None
+
+
+def test_s1_guard_downgrades_short_bare_mention():
+    # regression: live 0-99 (2026-06-15) buried two APPLY jobs on a 6-char
+    # 'Evidence: Remote'. The short-quote (<8) leniency was short-circuiting
+    # the S1 exclusion check — a bare 'Remote' must still downgrade.
+    reasoning = "Disqualifying rule: S1.\nEvidence: Remote"
+    desc = "Software Developer. Remote. Build APIs in Node and Python."
+    eff, why = eval_gate.verify_evidence("skip", reasoning, desc, tags=["S1"])
+    assert eff == "surface" and why is not None
+
+
+def test_s1_guard_keeps_real_exclusion():
+    reasoning = ("Disqualifying rule: S1.\n"
+                 "Evidence: 'Only applicants in the United States will be considered'")
+    desc = "Notes: Only applicants in the United States will be considered for this role."
+    eff, why = eval_gate.verify_evidence("skip", reasoning, desc, tags=["S1"])
+    assert eff == "skip" and why is None
+
+
+def test_s1_veto_skipped_when_another_rule_also_cited():
+    # regression: the 7B mistagged wrong-field skips as S1 + the real rule.
+    # If a non-geographic rule (S3) is also cited, the skip stands on THAT
+    # rule and the S1 quote-quality veto must NOT override it.
+    reasoning = ("Disqualifying rule: S3.\n"
+                 "Evidence: 'United States'")  # bare place, but S3 is the real reason
+    desc = "Scrum Engineer based in the United States. Agile ceremonies, sprints."
+    eff, why = eval_gate.verify_evidence("skip", reasoning, desc, tags=["S1", "S3"])
+    assert eff == "skip" and why is None
+
+
+def test_s1_veto_still_fires_when_s1_is_sole_basis():
+    reasoning = "Disqualifying rule: S1.\nEvidence: 'United States'"
+    desc = "Engineer. We hire across the United States and elsewhere. Node, Python."
+    eff, why = eval_gate.verify_evidence("skip", reasoning, desc, tags=["S1"])
+    assert eff == "surface" and why is not None
+
+
+def test_s1_exclusion_check_only_applies_to_s1():
+    # an S2 wrong-stack skip legitimately quotes a language name with no
+    # exclusion keyword — the S1-only check must not touch it.
+    reasoning = "Disqualifying rule: S2.\nEvidence: 'primary language is Java'"
+    desc = "Senior Engineer. The primary language is Java across the platform."
+    eff, why = eval_gate.verify_evidence("skip", reasoning, desc, tags=["S2"])
+    assert eff == "skip" and why is None
 
 
 def test_guard_ignores_surface_verdicts():
