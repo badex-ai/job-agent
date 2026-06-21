@@ -57,6 +57,15 @@ class Job(Base):
     applied           = Column(Boolean, default=False)
     status            = Column(String, default="new")  # new / reviewed / applied / ignored
 
+    # v2 gate verdict (the measured Qwen gate — replaces v1 overall_score)
+    gate_verdict       = Column(String)               # skip / surface / surface_priority
+    gate_reason        = Column(Text)                 # model reasoning (self-diagnosing row)
+    gate_model         = Column(String)               # qwen2.5:14b / hard_gate / offline
+    gate_tags          = Column(Text)                 # JSON list of cited rubric rules
+    gate_confidence    = Column(Integer)              # 0-100
+    gate_source        = Column(String)               # hard_gate / qwen / offline / error
+    gate_run_at        = Column(DateTime)             # when the gate scored this row
+
     # Contact info (extracted via regex, 0 tokens)
     company_email      = Column(String)               # careers@company.com
     recruiter_email    = Column(String)               # john.doe@company.com
@@ -112,3 +121,39 @@ def init_db():
     engine = get_engine()
     Base.metadata.create_all(engine)
     print("[DB] Tables created.")
+
+
+# SQLite ADD COLUMN is the only ALTER it supports, and create_all() never
+# touches an existing table. So new columns on an already-populated jobs.db
+# need an explicit, idempotent migration. Type strings are SQLite affinities.
+_GATE_COLUMNS = {
+    "gate_verdict": "VARCHAR",
+    "gate_reason": "TEXT",
+    "gate_model": "VARCHAR",
+    "gate_tags": "TEXT",
+    "gate_confidence": "INTEGER",
+    "gate_source": "VARCHAR",
+    "gate_run_at": "DATETIME",
+}
+
+
+def migrate_gate_columns(engine=None) -> list:
+    """Add any missing gate_* column to an existing jobs table. Idempotent:
+    re-running is a no-op once columns exist. Returns the columns it added."""
+    from sqlalchemy import text
+    engine = engine or get_engine()
+    Base.metadata.create_all(engine)  # fresh DB: table+columns exist already
+    added = []
+    with engine.begin() as conn:
+        existing = {row[1] for row in
+                    conn.execute(text("PRAGMA table_info(jobs)"))}
+        for col, sqltype in _GATE_COLUMNS.items():
+            if col not in existing:
+                conn.execute(text(f"ALTER TABLE jobs ADD COLUMN {col} {sqltype}"))
+                added.append(col)
+    return added
+
+
+if __name__ == "__main__":
+    added = migrate_gate_columns()
+    print(f"[migrate] gate columns added: {added or 'none (already present)'}")
