@@ -333,6 +333,45 @@ def test_guard_keeps_real_quote():
     assert why is None
 
 
+def test_guard_keeps_quote_from_title():
+    # 14b seen-200 (2026-06-16): on wrong-field skips the model proves S3 by
+    # quoting the job TITLE (a real field it was shown), which is absent from
+    # the description body. The old guard called these fabricated and buried
+    # 15 correct skips (SOAR/HPE NonStop/Data Engineer ...). The title must be
+    # part of the haystack.
+    reasoning = "Disqualifying rule: S3.\nEvidence: 'Remote SOAR Engineer'"
+    desc = "Join our security operations team building SOAR playbooks."
+    eff, why = eval_gate.verify_evidence(
+        "skip", reasoning, desc, tags=["S3"], title="Remote SOAR Engineer")
+    assert eff == "skip"
+    assert why is None
+
+
+def test_guard_keeps_one_real_fragment_of_multipart_quote():
+    # 14b emits several quoted snippets joined by commas; any one real snippet
+    # proves the skip. The joined string isn't a literal substring, so the old
+    # single-string check failed all of them and called the skip fabricated.
+    reasoning = ("Disqualifying rule: S3.\n"
+                 "Evidence: 'Remote SOAR Engineer', 'SOAR technologies'")
+    desc = "We operate SOAR technologies across the security stack."
+    eff, why = eval_gate.verify_evidence(
+        "skip", reasoning, desc, tags=["S3"], title="Remote SOAR Engineer")
+    assert eff == "skip"
+    assert why is None
+
+
+def test_guard_still_downgrades_when_no_fragment_verifies():
+    # the multipart leniency must not become a fabrication loophole: if NONE of
+    # the fragments appear in title+description, the skip is still invalid.
+    reasoning = ("Disqualifying rule: S3.\n"
+                 "Evidence: 'only for LATAM', 'must reside in Brazil'")
+    desc = "Kubernetes Engineer (100% Remote). McLean VA. Join our team."
+    eff, why = eval_gate.verify_evidence(
+        "skip", reasoning, desc, tags=["S3"], title="Kubernetes Engineer")
+    assert eff == "surface"
+    assert why and "fabricated" in why
+
+
 def test_s1_guard_downgrades_bare_place_mention():
     # live n=100 (2026-06-15): the 7B fired S1 quoting bare 'United States' /
     # 'Remote' — a real substring but a mention, not an exclusion. Buried APPLYs.

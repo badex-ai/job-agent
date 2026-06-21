@@ -87,15 +87,26 @@ S1_EXCLUSION_RE = re.compile(
     re.IGNORECASE)
 
 
+def _fragments(quote: str) -> list[str]:
+    """A model Evidence value is sometimes several quoted snippets joined by
+    commas (e.g. "'SOAR Engineer', 'SOAR technologies'"). Split on the snippet
+    separators and strip each fragment's quote chars so any one real fragment
+    can verify the skip — the model citing the title plus a body phrase must
+    not read as fabrication just because the joined string isn't a substring."""
+    parts = re.split(r"',\s*'|\",\s*\"|',\s*\"|\",\s*'", quote)
+    return [p.strip().strip("'\"").strip() for p in parts if p.strip()]
+
+
 def verify_evidence(
-    verdict: str, reasoning: str, description: str, tags: list[str] | None = None
+    verdict: str, reasoning: str, description: str, tags: list[str] | None = None,
+    title: str = "",
 ) -> tuple[str, str | None]:
     """Guard against fabricated AND non-exclusionary quotes. If the model
     skipped but its Evidence quote is NOT an actual substring of the
-    description, the skip is invalid -> downgrade to surface. Additionally,
-    a skip tagged S1 (geographic eligibility) must quote text that actually
-    EXCLUDES — a bare place name or 'Remote' is a mention, not a restriction,
-    and is downgraded. Returns (effective_verdict, reason_if_downgraded).
+    description (or the title), the skip is invalid -> downgrade to surface.
+    Additionally, a skip tagged S1 (geographic eligibility) must quote text
+    that actually EXCLUDES — a bare place name or 'Remote' is a mention, not a
+    restriction, and is downgraded. Returns (effective_verdict, reason).
 
     A short quote (<8 chars) is too weak to verify reliably, so we don't
     downgrade on it; we only reject quotes that are substantive AND absent."""
@@ -121,14 +132,22 @@ def verify_evidence(
         return "surface", f"S1 quote mentions a place but states no exclusion: {quote[:80]!r}"
     if len(quote) < 8:
         return verdict, None  # too short to verify substring; let it stand
-    # truncate to the same window the model actually saw
-    desc = description[:MAX_DESCRIPTION_CHARS]
-    if _norm(quote) in _norm(desc):
-        substr_ok = True
-    else:
-        # try a partial: first 40 normalized chars of the quote (model may pad)
-        head = _norm(quote)[:40]
-        substr_ok = bool(head and head in _norm(desc))
+    # Verify against the same window the model saw, PLUS the title — the model
+    # often quotes the job title (a real field it was shown) to prove a wrong-
+    # field/wrong-stack skip, and the title is not part of the description body.
+    haystack = _norm(title + "\n" + description[:MAX_DESCRIPTION_CHARS])
+
+    def _verifies(frag: str) -> bool:
+        if len(frag) < 8:
+            return False  # too short to verify a multi-part fragment reliably
+        nf = _norm(frag)
+        # full fragment, or its first 40 chars (model may pad past the quote)
+        return nf in haystack or (nf[:40] in haystack)
+
+    # Accept if the whole quote verifies OR any substantive fragment of a
+    # multi-snippet quote does. A model citing title + body must not be called
+    # fabrication because the comma-joined string isn't a literal substring.
+    substr_ok = _verifies(quote) or any(_verifies(f) for f in _fragments(quote))
     if not substr_ok:
         return "surface", f"fabricated/unverifiable evidence: {quote[:80]!r}"
     return verdict, None
@@ -235,7 +254,7 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None,
         raw_verdict = v["verdict"]
         eff_verdict, downgrade = verify_evidence(
             raw_verdict, v.get("reasoning", ""), j.get("description", ""),
-            tags=v.get("tags", []))
+            tags=v.get("tags", []), title=j.get("title", ""))
         results.append({
             "id": j.get("id"), "title": j.get("title"),
             "label": j["label"], "verdict": eff_verdict,
@@ -305,13 +324,17 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None,
 _VERDICT_MARK = {"skip": "SKIP", "surface": "surf", "surface_priority": "SURF+"}
 
 
-def _make_progress_printer(stream=sys.stderr):
+def _make_progress_printer(stream=sys.stderr, heartbeat_every=5):
     """Return an on_progress callback that renders a live line.
 
     On a TTY it rewrites one line in place (bar + percent + ETA + last
-    verdict); piped to a file it writes one line per job so a background
-    run's log stays greppable / tail-able. Carries running latency so a
-    stall is visible the moment a job runs slow."""
+    verdict) — the animated bar. When stderr is NOT a TTY (piped to a file,
+    or captured by a wrapping tool like Claude Code), an in-place bar can't
+    render, so it prints a throttled heartbeat instead: one line every
+    `heartbeat_every` jobs (plus always the first and the last), carrying
+    percent + count + ETA + last verdict. That keeps progress legible in a
+    captured terminal without flooding the log with one line per job.
+    Carries running latency so a stall is visible the moment a job runs slow."""
     start = time.time()
     is_tty = hasattr(stream, "isatty") and stream.isatty()
 
@@ -336,8 +359,15 @@ def _make_progress_printer(stream=sys.stderr):
             if done == total:
                 stream.write("\n")
         else:
-            stream.write(f"  {done:>3}/{total} ({pct_done:5.1f}%)  {dt:4.1f}s  "
-                         f"ETA {eta:4.0f}s  {mark:<5} {title}\n")
+            # Non-TTY (captured/piped): throttle to a heartbeat so the log
+            # stays readable. Always emit the first and last job so the run
+            # has a visible start and a clean finish line.
+            if done == 1 or done == total or done % heartbeat_every == 0:
+                stream.write(f"  {done:>3}/{total} ({pct_done:5.1f}%)  "
+                             f"ETA {eta:4.0f}s  {dt:4.1f}s/job  "
+                             f"{mark:<5} {title}\n")
+                stream.flush()
+                return
         stream.flush()
 
     return on_progress
