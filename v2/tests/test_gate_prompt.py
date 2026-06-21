@@ -130,6 +130,42 @@ def test_does_not_repeat_json_only_instruction(prompt):
     assert "Respond only in JSON" not in prompt
 
 
+# --- S2 PRE-CHECK: hard-no-aware OR-list guard ------------------------------
+# Live 14b 7-case probe (2026-06-21): the bare S2 rule over-fired on OR-lists
+# that contained one of the candidate's languages (it quoted the whole 'PHP, Golang, or
+# Node.js' list as evidence) — 17 of 42 baseline FPs were S2. The guard is two
+# ordered questions, NOT looser prose: Q1 fires S2 only on a SINGULAR hard-no
+# primary (so co-listed Python can't redeem a Java-primary role); Q2 surfaces
+# when any of the candidate's languages appears anywhere in an OR-list.
+
+def test_s2_precheck_present(prompt):
+    assert "S2 PRE-CHECK" in prompt
+    # it must sit inside the S2 rule, before S3 (where the model judges stack)
+    assert prompt.index("S2 PRE-CHECK") < prompt.index("S3 =")
+
+
+def test_s2_precheck_q1_fires_on_singular_hardno_primary(prompt):
+    # Q1: a hard-no language as the ONE primary/required language fires S2,
+    # and a co-listed Python must NOT redeem it (the Scotiabank correction).
+    assert "primary language" in prompt
+    assert "does not redeem" in prompt
+    # Java/C#/.NET named as the hard-no set the guard reasons about
+    pre = prompt[prompt.index("S2 PRE-CHECK"):prompt.index("S3 =")]
+    for hardno in ("Java", "C#", ".NET"):
+        assert hardno in pre, hardno
+
+
+def test_s2_precheck_q2_surfaces_his_stack_in_or_list(prompt):
+    # Q2: if any of the candidate's languages appears anywhere in the list -> surface,
+    # explicitly naming the OR-list mistake the guard exists to stop.
+    pre = prompt[prompt.index("S2 PRE-CHECK"):prompt.index("S3 =")]
+    assert "Node" in pre  # the candidate's language that the bare rule wrongly skipped
+    assert "do NOT fire" in pre or "surface" in pre
+    # the all-hard-no escape hatch stays: no candidate-stack anywhere -> S2 fires
+    assert "NO\n      candidate-stack language" in pre or "NO candidate-stack" in pre.replace(
+        "\n", " ").replace("   ", " ")
+
+
 # --- the builder really reads the paths it is given -------------------------
 
 def test_reads_given_paths(tmp_path):
