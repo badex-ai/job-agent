@@ -176,3 +176,29 @@ def test_render_skipped_tolerates_missing_reason(env):
     s.close()
     job = cli.get_rescue_queue()[0]
     assert cli.render_skipped(job, 1, 1) is not None
+
+
+# --- the cross-module invariant the rescue queue silently depends on -------
+
+def test_gate_skip_leaves_status_new_so_rescue_queue_is_not_empty():
+    """SPEC §7/C1 precondition: the gate must NEVER mutate Job.status. The rescue
+    queue is `status=='new' AND gate_verdict=='skip'`; if _apply_verdict marked
+    skips as 'ignored', the rescue queue would be empty BY CONSTRUCTION and the
+    whole bias defence would silently do nothing. This pins that invariant so a
+    future change to the gate fails here loudly instead of in production."""
+    from v2.loop import _apply_verdict
+    job = Job(id="g1", status="new")
+    _apply_verdict(job, {
+        "gate_verdict": "skip",
+        "gate_reason": "S2: Java shop",
+        "gate_model": "qwen2.5:14b",
+        "gate_tags": ["S2"],
+        "gate_confidence": 90,
+        "gate_source": "qwen",
+        "gate_run_at": None,
+    })
+    assert job.gate_verdict == "skip"
+    assert job.status == "new", (
+        "the gate must not touch Job.status — a skip row must stay 'new' so the "
+        "rescue queue can surface it (SPEC §7/C1)"
+    )
