@@ -79,6 +79,29 @@ def get_queue(session=None) -> List[Job]:
             session.close()
 
 
+def get_rescue_queue(session=None) -> List[Job]:
+    """Undecided gate-SKIPPED jobs to audit (SPEC §5c).
+
+    The complement of get_queue: rows the gate buried (gate_verdict='skip') that
+    are still 'new'. A confirm-skip or rescue advances status out of 'new', so
+    these drop out — resumable, same as the queue. Oldest first, deterministic."""
+    own = session is None
+    session = session or get_session()
+    try:
+        jobs = (
+            session.query(Job)
+            .filter(Job.status == "new", Job.gate_verdict == "skip")
+            .order_by(Job.scraped_at.asc(), Job.id.asc())
+            .all()
+        )
+        for job in jobs:
+            session.expunge(job)
+        return jobs
+    finally:
+        if own:
+            session.close()
+
+
 # --- the dispatch seam (headless, unit-tested) -----------------------------
 
 def apply_queue_action(
@@ -104,7 +127,27 @@ def apply_queue_action(
     label = _KEY_TO_LABEL.get(key)
     if label is None:
         return False, f"{key!r} is not a decision key (one of {tuple(_KEY_TO_LABEL)})"
+    return _record(job_id, label, source_view="queue", rule=rule, note=note,
+                   channel=channel, version=version, tone=tone)
 
+
+def _record(
+    job_id: str,
+    label: str,
+    *,
+    source_view: str,
+    rule: Optional[str] = None,
+    note: Optional[str] = None,
+    channel: Optional[str] = None,
+    version: Optional[str] = None,
+    tone: Optional[str] = None,
+) -> Tuple[bool, Optional[str]]:
+    """Write one decision (+ delegate apply side effects). Shared by the queue
+    and rescue seams so an APPLY is handled IDENTICALLY in both — only the
+    source_view differs. record_decision writes the immutable Decision and
+    advances Job.status; mark_applied owns the channel + follow-up schedule
+    (single-writer, SPEC §5d). On apply-tracking failure the label is already
+    persisted (append-only), so we surface the failure rather than lose it."""
     ok, err = record_decision(
         # a lightweight detached Job carrying only id is enough; record_decision
         # re-queries the row by id and reads the gate_* snapshot off the DB copy.
@@ -112,7 +155,7 @@ def apply_queue_action(
         label,
         rule=rule,
         note=note,
-        source_view="queue",
+        source_view=source_view,
     )
     if not ok:
         return False, err
@@ -122,11 +165,44 @@ def apply_queue_action(
             job_id, via=channel or "website", version=version, tone=tone
         )
         if not applied_ok:
-            # the Decision is already written (append-only); surface the tracking
-            # failure so the caller can tell the user the follow-up wasn't scheduled.
             return False, f"decision recorded but mark_applied failed: {applied_err}"
 
     return True, None
+
+
+def apply_rescue_action(
+    job_id: str,
+    key: str,
+    *,
+    sub_label: Optional[str] = None,
+    rule: Optional[str] = None,
+    note: Optional[str] = None,
+    channel: Optional[str] = None,
+    version: Optional[str] = None,
+    tone: Optional[str] = None,
+) -> Tuple[bool, Optional[str]]:
+    """Map one rescue keypress to its decision writes (source_view='rescue').
+
+    The rescue view is the selection-bias defence (SPEC §7/C1): the only channel
+    that labels gate-SKIPPED jobs, so the training set isn't surfaced-only.
+
+      * 'r' rescue   -> an act-set decision correcting the gate's false-negative.
+                        sub_label says which of APPLY/CONSIDER/HOLD; rule is the
+                        over-fired gate tag being corrected. An APPLY rescue runs
+                        the same mark_applied path as the queue — a real apply is
+                        a real apply regardless of where it was surfaced.
+      * 'c' confirm  -> a Decision AGREEING with the gate (human_label=SKIP). A
+                        confirmed buried job is itself a valuable label.
+    """
+    if key == "c":
+        return _record(job_id, "SKIP", source_view="rescue", rule=rule, note=note)
+    if key == "r":
+        if sub_label not in ("APPLY", "CONSIDER", "HOLD"):
+            return False, ("rescue needs sub_label in (APPLY, CONSIDER, HOLD); "
+                           f"got {sub_label!r}")
+        return _record(job_id, sub_label, source_view="rescue", rule=rule, note=note,
+                       channel=channel, version=version, tone=tone)
+    return False, f"{key!r} is not a rescue decision key (use 'r' or 'c')"
 
 
 def _load_job(job_id: str) -> Optional[Job]:
@@ -304,6 +380,131 @@ def _defer_loop(jobs: List[Job], tiers: dict) -> None:
         console.print(f"[green]✓ {_KEY_TO_LABEL[key]}[/green]" if ok
                       else f"[bold red]✗ {err}[/bold red]")
         return  # decision made → bounce to the outer loop's re-query
+
+
+# --- rescue view (SPEC §5c — the selection-bias defence) -------------------
+
+def render_skipped(job: Job, position: int, total: int) -> Panel:
+    """A buried job's audit card: the gate's fired rule + reason shown so the
+    user can judge whether the skip was a false-negative (SPEC §5c)."""
+    loc = job.location or ("remote" if job.is_remote else "—")
+    reason = job.gate_reason or "[dim](no reason given by gate)[/dim]"
+    body = (
+        f"[bold]{job.title or '—'}[/bold] @ [bold]{job.company or '—'}[/bold]\n"
+        f"[dim]{loc} · {job.source or '—'}[/dim]\n\n"
+        f"buried by: [red]{_tags(job)}[/red]\n\n"
+        f"{reason}"
+    )
+    return Panel(body, title=f"[{position}/{total}]  rescue audit",
+                 border_style="red")
+
+
+def run_rescue() -> None:
+    """Audit the gate's buried jobs. Each pass re-queries; a confirm/rescue
+    advances status out of 'new' so the row drops out (resumable). Empty =
+    'nothing buried to audit'."""
+    while True:
+        jobs = get_rescue_queue()
+        if not jobs:
+            console.print(Panel("✅ No buried jobs to audit.", style="bold green"))
+            return
+
+        job = jobs[0]
+        console.clear()
+        console.print(render_skipped(job, 1, len(jobs)))
+        console.print(
+            "[dim]r[/dim] rescue (gate was wrong)  [dim]c[/dim] confirm skip  "
+            "[dim]o[/dim] open  [dim]n[/dim] next  [dim]b[/dim] back"
+        )
+        key = Prompt.ask("Action", choices=["r", "c", "o", "n", "b"], default="n")
+
+        if key == "b":
+            return
+        if key == "n":
+            _rescue_defer_loop(jobs)
+            return
+        if key == "o":
+            if job.apply_link:
+                webbrowser.open(job.apply_link)
+                console.print(f"[dim]opened {job.apply_link}[/dim]")
+            else:
+                console.print("[yellow]no apply_link on this job[/yellow]")
+            Prompt.ask("press ENTER", default="")
+            continue
+
+        ok, err = _do_rescue_action(job, key)
+        if ok is None:                      # user backed out of the rescue prompt
+            continue
+        console.print(f"[green]✓ recorded[/green]" if ok
+                      else f"[bold red]✗ {err}[/bold red]")
+        if not ok:
+            Prompt.ask("press ENTER", default="")
+        # loop re-queries; the decided job drops out.
+
+
+def _do_rescue_action(job: Job, key: str):
+    """Collect the inputs a rescue/confirm needs and call apply_rescue_action.
+    Returns (ok, err); ok is None if the user aborted the rescue sub-prompt."""
+    if key == "c":
+        return apply_rescue_action(job.id, "c", note=None)
+
+    # key == 'r': pick the act-set label + the over-fired rule being corrected.
+    sub = Prompt.ask("Rescue as", choices=["apply", "consider", "hold"], default="consider")
+    sub_label = {"apply": "APPLY", "consider": "CONSIDER", "hold": "HOLD"}[sub]
+
+    rule = None
+    fired = _fired_tags(job)
+    if fired and Confirm.ask(f"Tag the over-fired rule ({', '.join(fired)})?", default=True):
+        rule = Prompt.ask("Rule", choices=fired, default=fired[0])
+
+    kwargs = {}
+    if sub_label == "APPLY":
+        if job.applied:
+            console.print(Panel("Already applied.", style="yellow"))
+            Prompt.ask("press ENTER", default="")
+            return None, None
+        kwargs = _prompt_apply_tracking()
+    return apply_rescue_action(job.id, "r", sub_label=sub_label, rule=rule, **kwargs)
+
+
+def _fired_tags(job: Job) -> list:
+    """The gate's cited rules, as a list (for the rescue rule-correction prompt)."""
+    try:
+        tags = json.loads(job.gate_tags or "[]")
+        return [t for t in tags if t] or list(SKIP_RULES)
+    except (ValueError, TypeError):
+        return list(SKIP_RULES)
+
+
+def _rescue_defer_loop(jobs: List[Job]) -> None:
+    """'next' walk through the in-memory rescue pass (mirror of _defer_loop)."""
+    idx = 1
+    while idx < len(jobs):
+        job = jobs[idx]
+        console.clear()
+        console.print(render_skipped(job, idx + 1, len(jobs)))
+        console.print(
+            "[dim]r[/dim] rescue  [dim]c[/dim] confirm skip  "
+            "[dim]o[/dim] open  [dim]n[/dim] next  [dim]b[/dim] back"
+        )
+        key = Prompt.ask("Action", choices=["r", "c", "o", "n", "b"], default="n")
+        if key == "b":
+            return
+        if key == "n":
+            idx += 1
+            continue
+        if key == "o":
+            if job.apply_link:
+                webbrowser.open(job.apply_link)
+            Prompt.ask("press ENTER", default="")
+            continue
+        ok, err = _do_rescue_action(job, key)
+        if ok is None:
+            idx += 1
+            continue
+        console.print("[green]✓ recorded[/green]" if ok
+                      else f"[bold red]✗ {err}[/bold red]")
+        return
 
 
 if __name__ == "__main__":
