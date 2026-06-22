@@ -19,6 +19,12 @@ shared/config/_profile.yml
 # back it up privately, never push it.
 data/
 
+# Local-only v2 tooling kept out of a clone but preserved for our own work:
+#   labeling/ — the toolchain that produces hand-labels (may feed the retrain loop)
+#   scratch/  — one-off probes, spikes, model comparisons
+v2/labeling/
+v2/scratch/
+
 # ----- Environment & Secrets -----
 .env
 .env.local
