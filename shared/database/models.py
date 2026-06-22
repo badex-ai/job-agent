@@ -92,6 +92,34 @@ class Job(Base):
     rejection_data     = Column(Text)                 # JSON: {reason, date, lessons}
 
 
+class Decision(Base):
+    """Append-only training signal: one immutable row per human triage action.
+
+    The load-bearing half of the apply/triage CLI (SPEC §4a). Each row pairs the
+    human's four-way label with a SNAPSHOT of the gate's verdict AT DECISION
+    TIME — frozen here so a later re-gate of the Job row can never corrupt the
+    label's decision-time context. Rows are inserted, never updated or deleted;
+    re-deciding the same job inserts a SECOND row and keeps both.
+    """
+    __tablename__ = "decisions"
+
+    id            = Column(Integer, primary_key=True, autoincrement=True)
+    job_id        = Column(String)                     # FK -> jobs.id (Job.id is a String)
+    decided_at    = Column(DateTime, default=datetime.utcnow)
+
+    # the gate's call AT DECISION TIME, frozen (never re-read from the Job row):
+    gate_verdict  = Column(String)                     # skip / surface / surface_priority
+    gate_reason   = Column(Text)                       # snapshot
+    gate_tags     = Column(Text)                       # JSON list snapshot (S1..S6 etc.)
+    gate_model    = Column(String)                     # snapshot (e.g. qwen2.5:14b)
+
+    # the human label (the new ground truth):
+    human_label   = Column(String)                     # APPLY / CONSIDER / HOLD / SKIP
+    human_rule    = Column(String)                     # optional: rule being corrected (S1..S6)
+    note          = Column(Text)                       # optional free text
+    source_view   = Column(String)                     # 'queue' | 'rescue' (selection context, §7)
+
+
 def get_engine():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     return create_engine(f"sqlite:///{DB_PATH}", echo=False)
@@ -154,6 +182,20 @@ def migrate_gate_columns(engine=None) -> list:
     return added
 
 
+def migrate_decisions(engine=None) -> bool:
+    """Create the append-only `decisions` table on an existing DB. Idempotent:
+    create_all never touches a table that already exists, so re-running is a
+    no-op. Mirrors migrate_gate_columns. Returns True if the table was absent
+    before this call (i.e. it was just created), False if it already existed."""
+    from sqlalchemy import inspect
+    engine = engine or get_engine()
+    existed = inspect(engine).has_table("decisions")
+    Base.metadata.create_all(engine)  # creates `decisions` if missing; no-op otherwise
+    return not existed
+
+
 if __name__ == "__main__":
     added = migrate_gate_columns()
     print(f"[migrate] gate columns added: {added or 'none (already present)'}")
+    created = migrate_decisions()
+    print(f"[migrate] decisions table: {'created' if created else 'already present'}")
