@@ -21,16 +21,26 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
 
 import json
 import webbrowser
+from datetime import datetime
 from typing import List, Optional, Tuple
 
 from rich.console import Console
 from rich.panel import Panel
 from rich.table import Table
 from rich.prompt import Prompt, Confirm
+from rich.align import Align
+from rich.text import Text
 
 from shared.database.models import Job, get_session
 from shared.database.decisions import record_decision
-from shared.database.tracking import mark_applied
+from shared.database.tracking import (
+    mark_applied,
+    mark_followup_sent,
+    mark_response_received,
+    get_jobs_needing_followup,
+    get_application_stats,
+    get_followup_summary,
+)
 
 console = Console()
 
@@ -48,6 +58,7 @@ SKIP_RULES = ("S1", "S2", "S3", "S4", "S5", "S6")
 CHANNELS = ("website", "linkedin", "email")
 MESSAGE_VERSIONS = ("A", "B", "C")
 MESSAGE_TONES = ("formal", "casual", "story")
+RESPONSE_TYPES = ("positive", "negative", "later")
 
 
 # --- data access -----------------------------------------------------------
@@ -275,8 +286,10 @@ def _prompt_apply_tracking() -> dict:
 def run_queue() -> None:
     """The daily queue loop: clear surfaced jobs one keypress at a time.
 
-    Re-queries each pass so the queue is always live and resumable. Done when the
-    queue is empty → an explicit 'cleared for today' state (SPEC §5b/§9).
+    Re-queries the DB on every decision so the queue is always live and resumable
+    (decided jobs drop out; SPEC §5b/§9). Within one in-memory pass, 'next' walks
+    forward by index without re-querying — so deferring a job doesn't bounce you
+    back to the head. Done = queue empty → explicit 'cleared for today' state.
     """
     while True:
         jobs = get_queue()
@@ -286,100 +299,60 @@ def run_queue() -> None:
             return
 
         tiers = _tier_counts(jobs)
-        job = jobs[0]                       # always act on the head of the live queue
-        position = 1
-        total = len(jobs)
+        idx = 0
+        while idx < len(jobs):              # walk this pass; a decision re-queries
+            job = jobs[idx]
+            console.clear()
+            console.print(render_job(job, idx + 1, len(jobs), tiers))
+            console.print(
+                "[dim]a[/dim] apply  [dim]c[/dim] consider  [dim]h[/dim] hold  "
+                "[dim]s[/dim] skip  [dim]o[/dim] open  [dim]n[/dim] next  [dim]b[/dim] back"
+            )
+            key = Prompt.ask("Action", choices=list(ACTION_KEYS), default="n")
 
-        console.clear()
-        console.print(render_job(job, position, total, tiers))
-        console.print(
-            "[dim]a[/dim] apply  [dim]c[/dim] consider  [dim]h[/dim] hold  "
-            "[dim]s[/dim] skip  [dim]o[/dim] open  [dim]n[/dim] next  [dim]b[/dim] back"
-        )
-
-        key = Prompt.ask("Action", choices=list(ACTION_KEYS), default="n")
-
-        if key == "b":
-            return
-        if key == "n":
-            # defer: no decision. Move it behind the rest of this pass by nudging
-            # status nowhere — instead just re-loop; to avoid an infinite loop on a
-            # single deferred job, advance to the next undecided in THIS list.
-            _defer_loop(jobs, tiers)
-            return
-        if key == "o":
-            if job.apply_link:
-                webbrowser.open(job.apply_link)
-                console.print(f"[dim]opened {job.apply_link}[/dim]")
-            else:
-                console.print("[yellow]no apply_link on this job[/yellow]")
-            Prompt.ask("press ENTER", default="")
-            continue
-
-        # a decision key (a/c/h/s)
-        rule = note = None
-        kwargs = {}
-        if key == "s":
-            if Confirm.ask("Tag the rule this skip corrects?", default=False):
-                rule = Prompt.ask("Rule", choices=list(SKIP_RULES), default="S2")
-        if key == "a":
-            if job.applied:                 # idempotent apply (SPEC §9)
-                console.print(Panel(
-                    f"Already applied via {job.applied_via or '?'} "
-                    f"on {job.applied_at}. Re-open the posting with 'o'.",
-                    style="yellow"))
-                Prompt.ask("press ENTER", default="")
-                continue
-            kwargs = _prompt_apply_tracking()
-
-        ok, err = apply_queue_action(job.id, key, rule=rule, note=note, **kwargs)
-        if ok:
-            console.print(f"[green]✓ recorded {_KEY_TO_LABEL[key]}[/green]")
-        else:
-            console.print(f"[bold red]✗ {err}[/bold red]")
-            Prompt.ask("press ENTER", default="")
-        # loop re-queries; the decided job is gone, the next head appears.
-
-
-def _defer_loop(jobs: List[Job], tiers: dict) -> None:
-    """Walk the current in-memory pass without re-querying, so 'next' can skip
-    forward through jobs without re-deciding earlier ones. A pragmatic local
-    affordance; the outer loop owns correctness via re-query on every decision."""
-    idx = 1
-    while idx < len(jobs):
-        job = jobs[idx]
-        console.clear()
-        console.print(render_job(job, idx + 1, len(jobs), tiers))
-        console.print(
-            "[dim]a[/dim] apply  [dim]c[/dim] consider  [dim]h[/dim] hold  "
-            "[dim]s[/dim] skip  [dim]o[/dim] open  [dim]n[/dim] next  [dim]b[/dim] back"
-        )
-        key = Prompt.ask("Action", choices=list(ACTION_KEYS), default="n")
-        if key == "b":
-            return
-        if key == "n":
-            idx += 1
-            continue
-        if key == "o":
-            if job.apply_link:
-                webbrowser.open(job.apply_link)
-            Prompt.ask("press ENTER", default="")
-            continue
-        rule = None
-        kwargs = {}
-        if key == "s" and Confirm.ask("Tag the rule this skip corrects?", default=False):
-            rule = Prompt.ask("Rule", choices=list(SKIP_RULES), default="S2")
-        if key == "a":
-            if job.applied:
-                console.print(Panel("Already applied.", style="yellow"))
-                Prompt.ask("press ENTER", default="")
+            if key == "b":
+                return
+            if key == "n":                  # defer: advance within this pass
                 idx += 1
                 continue
-            kwargs = _prompt_apply_tracking()
-        ok, err = apply_queue_action(job.id, key, rule=rule, **kwargs)
-        console.print(f"[green]✓ {_KEY_TO_LABEL[key]}[/green]" if ok
-                      else f"[bold red]✗ {err}[/bold red]")
-        return  # decision made → bounce to the outer loop's re-query
+            if key == "o":
+                _open(job)
+                continue
+
+            # a decision key (a/c/h/s)
+            rule = None
+            kwargs = {}
+            if key == "s" and Confirm.ask("Tag the rule this skip corrects?", default=False):
+                rule = Prompt.ask("Rule", choices=list(SKIP_RULES), default="S2")
+            if key == "a":
+                if job.applied:             # idempotent apply (SPEC §9)
+                    console.print(Panel(
+                        f"Already applied via {job.applied_via or '?'} "
+                        f"on {job.applied_at}. Re-open the posting with 'o'.",
+                        style="yellow"))
+                    Prompt.ask("press ENTER", default="")
+                    idx += 1
+                    continue
+                kwargs = _prompt_apply_tracking()
+
+            ok, err = apply_queue_action(job.id, key, rule=rule, **kwargs)
+            if ok:
+                console.print(f"[green]✓ recorded {_KEY_TO_LABEL[key]}[/green]")
+            else:
+                console.print(f"[bold red]✗ {err}[/bold red]")
+                Prompt.ask("press ENTER", default="")
+            break                           # decision made → re-query the live queue
+
+
+def _open(job: Job) -> None:
+    """Open the posting in a browser (SPEC §5b 'o'). Dead links are deferred (§9):
+    the browser opens whatever's there; the user notices a 404 and moves on."""
+    if job.apply_link:
+        webbrowser.open(job.apply_link)
+        console.print(f"[dim]opened {job.apply_link}[/dim]")
+    else:
+        console.print("[yellow]no apply_link on this job[/yellow]")
+    Prompt.ask("press ENTER", default="")
 
 
 # --- rescue view (SPEC §5c — the selection-bias defence) -------------------
@@ -400,46 +373,44 @@ def render_skipped(job: Job, position: int, total: int) -> Panel:
 
 
 def run_rescue() -> None:
-    """Audit the gate's buried jobs. Each pass re-queries; a confirm/rescue
-    advances status out of 'new' so the row drops out (resumable). Empty =
-    'nothing buried to audit'."""
+    """Audit the gate's buried jobs. Re-queries on every decision (a confirm/
+    rescue advances status out of 'new' so the row drops out — resumable). 'next'
+    walks forward within the pass by index. Empty = 'nothing buried to audit'."""
     while True:
         jobs = get_rescue_queue()
         if not jobs:
             console.print(Panel("✅ No buried jobs to audit.", style="bold green"))
             return
 
-        job = jobs[0]
-        console.clear()
-        console.print(render_skipped(job, 1, len(jobs)))
-        console.print(
-            "[dim]r[/dim] rescue (gate was wrong)  [dim]c[/dim] confirm skip  "
-            "[dim]o[/dim] open  [dim]n[/dim] next  [dim]b[/dim] back"
-        )
-        key = Prompt.ask("Action", choices=["r", "c", "o", "n", "b"], default="n")
+        idx = 0
+        while idx < len(jobs):
+            job = jobs[idx]
+            console.clear()
+            console.print(render_skipped(job, idx + 1, len(jobs)))
+            console.print(
+                "[dim]r[/dim] rescue (gate was wrong)  [dim]c[/dim] confirm skip  "
+                "[dim]o[/dim] open  [dim]n[/dim] next  [dim]b[/dim] back"
+            )
+            key = Prompt.ask("Action", choices=["r", "c", "o", "n", "b"], default="n")
 
-        if key == "b":
-            return
-        if key == "n":
-            _rescue_defer_loop(jobs)
-            return
-        if key == "o":
-            if job.apply_link:
-                webbrowser.open(job.apply_link)
-                console.print(f"[dim]opened {job.apply_link}[/dim]")
-            else:
-                console.print("[yellow]no apply_link on this job[/yellow]")
-            Prompt.ask("press ENTER", default="")
-            continue
+            if key == "b":
+                return
+            if key == "n":
+                idx += 1
+                continue
+            if key == "o":
+                _open(job)
+                continue
 
-        ok, err = _do_rescue_action(job, key)
-        if ok is None:                      # user backed out of the rescue prompt
-            continue
-        console.print(f"[green]✓ recorded[/green]" if ok
-                      else f"[bold red]✗ {err}[/bold red]")
-        if not ok:
-            Prompt.ask("press ENTER", default="")
-        # loop re-queries; the decided job drops out.
+            ok, err = _do_rescue_action(job, key)
+            if ok is None:                  # user backed out of the rescue prompt
+                idx += 1
+                continue
+            console.print("[green]✓ recorded[/green]" if ok
+                          else f"[bold red]✗ {err}[/bold red]")
+            if not ok:
+                Prompt.ask("press ENTER", default="")
+            break                           # decision made → re-query the live queue
 
 
 def _do_rescue_action(job: Job, key: str):
@@ -476,36 +447,201 @@ def _fired_tags(job: Job) -> list:
         return list(SKIP_RULES)
 
 
-def _rescue_defer_loop(jobs: List[Job]) -> None:
-    """'next' walk through the in-memory rescue pass (mirror of _defer_loop)."""
-    idx = 1
-    while idx < len(jobs):
-        job = jobs[idx]
-        console.clear()
-        console.print(render_skipped(job, idx + 1, len(jobs)))
-        console.print(
-            "[dim]r[/dim] rescue  [dim]c[/dim] confirm skip  "
-            "[dim]o[/dim] open  [dim]n[/dim] next  [dim]b[/dim] back"
-        )
-        key = Prompt.ask("Action", choices=["r", "c", "o", "n", "b"], default="n")
-        if key == "b":
-            return
-        if key == "n":
-            idx += 1
-            continue
-        if key == "o":
-            if job.apply_link:
-                webbrowser.open(job.apply_link)
-            Prompt.ask("press ENTER", default="")
-            continue
-        ok, err = _do_rescue_action(job, key)
-        if ok is None:
-            idx += 1
-            continue
-        console.print("[green]✓ recorded[/green]" if ok
-                      else f"[bold red]✗ {err}[/bold red]")
+# --- follow-ups + stats (PORT from v1; data contract already gate-agnostic) -
+
+def run_followups() -> None:
+    """Follow-up manager — ported from v1/dashboard/cli.py. The tracking layer
+    is score-free (reads applied/next_followup_due, not gate verdicts), so this
+    ports with NO data-contract swap (SPEC §5d)."""
+    console.clear()
+    jobs = get_jobs_needing_followup()
+    summary = get_followup_summary()
+
+    console.print(Align.center("[bold cyan]📬 Follow-up Manager[/bold cyan]"))
+    console.print()
+    summary_table = Table(show_header=False, box=None, padding=(0, 2))
+    summary_table.add_row("[red]Overdue[/red]", f"[bold red]{summary['overdue']}[/bold red]")
+    summary_table.add_row("[yellow]Due Today[/yellow]", f"[bold yellow]{summary['due_today']}[/bold yellow]")
+    summary_table.add_row("[cyan]Next 3 Days[/cyan]", f"[bold]{summary['upcoming_3_days']}[/bold]")
+    summary_table.add_row("[dim]Awaiting Response[/dim]", f"[bold]{summary['total_awaiting']}[/bold]")
+    console.print(Align.center(summary_table))
+    console.print()
+
+    if not jobs:
+        console.print(Panel("No follow-ups due right now.", style="green"))
+        Prompt.ask("Press ENTER to continue", default="")
         return
+
+    table = Table(title="Jobs Needing Follow-up", show_header=True, header_style="bold yellow")
+    table.add_column("#", style="dim", width=3)
+    table.add_column("Company", width=18)
+    table.add_column("Title", width=25)
+    table.add_column("Applied", width=10)
+    table.add_column("Follow-up #", justify="center", width=10)
+    table.add_column("Due", width=12)
+    for i, job in enumerate(jobs[:20], 1):
+        applied_date = job.applied_at.strftime("%m/%d") if job.applied_at else "?"
+        followup_num = f"{(job.followup_count or 0) + 1}/3"
+        if job.next_followup_due:
+            days_diff = (datetime.now() - job.next_followup_due).days
+            if days_diff > 0:
+                due_text = Text(f"{days_diff}d overdue", style="bold red")
+            elif days_diff == 0:
+                due_text = Text("Today", style="bold yellow")
+            else:
+                due_text = Text(f"In {-days_diff}d", style="dim")
+        else:
+            due_text = Text("—", style="dim")
+        table.add_row(str(i), (job.company or "?")[:16], (job.title or "?")[:23],
+                      applied_date, followup_num, due_text)
+    console.print(table)
+    console.print()
+
+    action = Prompt.ask("Action", choices=["send", "response", "back"], default="back")
+    if action == "back":
+        return
+    job_num = Prompt.ask("Job # (from list above)", default="1")
+    try:
+        idx = int(job_num) - 1
+        if 0 <= idx < len(jobs):
+            if action == "send":
+                _handle_followup_sent(jobs[idx])
+            elif action == "response":
+                _handle_response_received(jobs[idx])
+    except (ValueError, IndexError):
+        console.print("[red]Invalid job number[/red]")
+        Prompt.ask("Press ENTER to continue", default="")
+
+
+def _handle_followup_sent(job: Job) -> None:
+    console.print(f"\nRecording follow-up for: [bold]{job.title}[/bold] @ {job.company}")
+    success, error = mark_followup_sent(job.id)
+    if success:
+        new_count = (job.followup_count or 0) + 1
+        console.print(f"[green]✓ Follow-up #{new_count} recorded![/green]")
+        if new_count >= 3:
+            console.print("[dim]Final follow-up. No more will be scheduled.[/dim]")
+    else:
+        console.print(f"[red]✗ Failed: {error}[/red]")
+    Prompt.ask("Press ENTER to continue", default="")
+
+
+def _handle_response_received(job: Job) -> None:
+    console.print(f"\nRecording response for: [bold]{job.title}[/bold] @ {job.company}\n")
+    response_type = Prompt.ask("Response type", choices=list(RESPONSE_TYPES), default="positive")
+    interview_scheduled = False
+    if response_type == "positive":
+        interview_scheduled = Confirm.ask("Interview scheduled?", default=False)
+    success, error = mark_response_received(job.id, response_type=response_type,
+                                            interview_scheduled=interview_scheduled)
+    if success:
+        console.print(f"[green]✓ Response recorded: {response_type}[/green]")
+        if interview_scheduled:
+            console.print("[bold green]🎉 Congratulations on the interview![/bold green]")
+    else:
+        console.print(f"[red]✗ Failed: {error}[/red]")
+    Prompt.ask("Press ENTER to continue", default="")
+
+
+def run_stats() -> None:
+    """Application + A/B stats — ported from v1. Pure tracking layer, no score
+    reads, so a verbatim port (SPEC §5d)."""
+    console.clear()
+    stats = get_application_stats()
+    console.print(Align.center("[bold cyan]📊 Application Statistics[/bold cyan]"))
+    console.print()
+    overview = Table(title="Overview", show_header=False, box=None)
+    overview.add_row("Total Applied", f"[bold]{stats['total_applied']}[/bold]")
+    overview.add_row("Awaiting Response", f"[yellow]{stats['awaiting_response']}[/yellow]")
+    overview.add_row("Responses Received", f"[green]{stats['responses_received']}[/green]")
+    overview.add_row("Interviews Scheduled", f"[bold green]{stats['interviews_scheduled']}[/bold green]")
+    console.print(overview)
+    console.print()
+
+    channel_table = Table(title="By Channel", show_header=True, header_style="cyan")
+    channel_table.add_column("Channel", width=12)
+    channel_table.add_column("Count", justify="center", width=8)
+    channel_table.add_column("Response Rate", justify="center", width=14)
+    for channel in ("website", "linkedin", "email"):
+        count = stats["by_channel"].get(channel, 0)
+        rate = stats["response_rate_by_channel"].get(channel, 0)
+        rate_style = "green" if rate > 20 else "yellow" if rate > 10 else "dim"
+        channel_table.add_row(channel.capitalize(), str(count),
+                              Text(f"{rate}%", style=rate_style) if count > 0
+                              else Text("—", style="dim"))
+    console.print(channel_table)
+    console.print()
+
+    if any(stats["by_version"].get(v, 0) > 0 for v in ("A", "B", "C")):
+        version_table = Table(title="A/B Test: Message Versions", show_header=True, header_style="cyan")
+        version_table.add_column("Version", width=10)
+        version_table.add_column("Count", justify="center", width=8)
+        version_table.add_column("Response Rate", justify="center", width=14)
+        for version in ("A", "B", "C"):
+            count = stats["by_version"].get(version, 0)
+            if count > 0:
+                rate = stats["response_rate_by_version"].get(version, 0)
+                rate_style = "green" if rate > 20 else "yellow" if rate > 10 else "dim"
+                version_table.add_row(f"Version {version}", str(count),
+                                      Text(f"{rate}%", style=rate_style))
+        console.print(version_table)
+        console.print()
+    Prompt.ask("Press ENTER to continue", default="")
+
+
+# --- main menu (SPEC §5a) --------------------------------------------------
+
+def menu_counts(session=None) -> dict:
+    """The dashboard's at-a-glance counts (queue / rescue / applied). Factored
+    out so it's unit-testable headless. 'buried' uses the same status='new' AND
+    gate_verdict='skip' predicate the rescue queue depends on (SPEC §7/C1)."""
+    own = session is None
+    session = session or get_session()
+    try:
+        return {
+            "queue": (session.query(Job)
+                      .filter(Job.status == "new",
+                              Job.gate_verdict.in_(QUEUE_VERDICTS)).count()),
+            "buried": (session.query(Job)
+                       .filter(Job.status == "new",
+                               Job.gate_verdict == "skip").count()),
+            "applied": session.query(Job).filter(Job.status == "applied").count(),
+        }
+    finally:
+        if own:
+            session.close()
+
+
+def run() -> None:
+    """The daily dashboard: queue · rescue · followups · stats · exit (SPEC §5a).
+    A thin dispatcher — each view owns its own loop."""
+    while True:
+        console.clear()
+        counts = menu_counts()
+        new_surfaced, buried, applied = counts["queue"], counts["buried"], counts["applied"]
+        followups_due = get_followup_summary()
+        due = followups_due["overdue"] + followups_due["due_today"]
+
+        console.print(Align.center("[bold cyan]🤖 Job Agent — v2 Triage[/bold cyan]"))
+        console.print()
+        if due > 0:
+            console.print(Align.center(f"[bold yellow]⚠️  {due} follow-up(s) due![/bold yellow]\n"))
+        stats_table = Table(show_header=False, box=None, padding=(0, 2))
+        stats_table.add_row("[cyan]Queue (surfaced)[/cyan]", f"[bold green]{new_surfaced}[/bold green]")
+        stats_table.add_row("[cyan]Rescue (buried)[/cyan]", f"[bold]{buried}[/bold]")
+        stats_table.add_row("[cyan]Applied[/cyan]", f"[bold]{applied}[/bold]")
+        console.print(Align.center(stats_table))
+        console.print()
+
+        choice = Prompt.ask("Choose",
+                            choices=["queue", "rescue", "followups", "stats", "exit"],
+                            default="queue")
+        if choice == "exit":
+            console.print("[yellow]Goodbye! 👋[/yellow]")
+            return
+        {"queue": run_queue, "rescue": run_rescue,
+         "followups": run_followups, "stats": run_stats}[choice]()
 
 
 if __name__ == "__main__":
-    run_queue()
+    run()

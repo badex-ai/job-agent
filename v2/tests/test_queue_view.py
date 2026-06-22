@@ -212,3 +212,21 @@ def test_render_job_tolerates_missing_reason(env):
     job = cli.get_queue()[0]
     panel = cli.render_job(job, 1, 1, {"surface_priority": 0, "surface": 1})
     assert panel is not None     # built a Panel without raising
+
+
+# --- menu counts (SPEC §5a dashboard) --------------------------------------
+
+def test_menu_counts_partitions_by_verdict_and_status(env):
+    s = env()
+    _seed(s, "prio", verdict="surface_priority")
+    _seed(s, "surf", verdict="surface")
+    _seed(s, "buried1", verdict="skip")
+    _seed(s, "buried2", verdict="skip")
+    _seed(s, "done", verdict="surface", status="applied")
+    _seed(s, "decided-skip", verdict="skip", status="ignored")  # not buried anymore
+    s.close()
+
+    counts = cli.menu_counts()
+    assert counts["queue"] == 2      # prio + surf, both still 'new'
+    assert counts["buried"] == 2     # only the undecided skips
+    assert counts["applied"] == 1
