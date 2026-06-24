@@ -92,13 +92,25 @@ def gate_pending(session, *, offline: bool, model: str = GATE_MODEL,
         pending = pending.limit(limit)
     pending = pending.all()
 
-    summary = {"gated": 0, "surfaced": 0, "skipped": 0, "by_source": {}}
+    summary = {"gated": 0, "surfaced": 0, "skipped": 0, "by_source": {},
+               "m4_down": False}
     for job in pending:
-        rec = gate_one({"id": job.id, "title": job.title,
-                        "company": job.company, "location": job.location,
-                        "description": job.description},
-                       system_prompt=system_prompt, model=model,
-                       transport=transport)
+        try:
+            rec = gate_one({"id": job.id, "title": job.title,
+                            "company": job.company, "location": job.location,
+                            "description": job.description},
+                           system_prompt=system_prompt, model=model,
+                           transport=transport)
+        except OSError as exc:
+            # Transport failure = the M4 is down (URLError/timeout, both OSError).
+            # It is down for *every* job, so stop the cycle rather than hammer a
+            # dead host N times. This job stays gate_verdict IS NULL, so the next
+            # cycle retries it automatically — NULL is the retry queue, no per-job
+            # state needed. A malformed *model* response is NOT an OSError; it's
+            # caught inside gate_one and surfaced, so it never reaches here.
+            logger.warning(f"[GATE] M4 unreachable, stopping cycle: {exc}")
+            summary["m4_down"] = True
+            break
         _apply_verdict(job, rec)
         summary["gated"] += 1
         summary["surfaced" if rec["surfaced"] else "skipped"] += 1
@@ -116,8 +128,14 @@ def cycle(*, offline: bool, scrape: bool = True,
                 f"(offline={offline}, model={model})")
     session = get_session()
     try:
+        # Backlog-first: clear the NULL debt BEFORE scraping more. Across repeated
+        # short M4 outages this keeps the ungated pile from growing unboundedly —
+        # we pay down what we owe before adding new jobs to gate.
+        logger.info("[GATE] clearing NULL backlog before scraping...")
+        summary = gate_pending(session, offline=offline, model=model, limit=limit)
+
         stored = 0
-        if scrape:
+        if scrape and not summary["m4_down"]:
             from shared.scraper.job_scraper import run_scrape
             logger.info("[READ] scraping...")
             raw = run_scrape()
@@ -125,14 +143,28 @@ def cycle(*, offline: bool, scrape: bool = True,
             stored = _store_new_jobs(session, raw)
             logger.info(f"[READ] {stored} new jobs stored (rest already seen)")
 
-        logger.info("[GATE] scoring rows with gate_verdict IS NULL...")
-        summary = gate_pending(session, offline=offline, model=model,
-                               limit=limit)
+            # Gate the freshly-stored jobs in the same cycle (folding the second
+            # pass's counts into the summary). Skipped if the M4 was already found
+            # down above — no point scraping into a dead gate.
+            logger.info("[GATE] scoring newly-stored rows...")
+            second = gate_pending(session, offline=offline, model=model, limit=limit)
+            for k in ("gated", "surfaced", "skipped"):
+                summary[k] += second[k]
+            for src, n in second["by_source"].items():
+                summary["by_source"][src] = summary["by_source"].get(src, 0) + n
+            summary["m4_down"] = summary["m4_down"] or second["m4_down"]
+        elif scrape and summary["m4_down"]:
+            logger.warning("[READ] skipping scrape — M4 is down, gate is dead.")
+
         summary["stored"] = stored
         logger.info(f"[GATE] {summary['gated']} gated — "
                     f"{summary['surfaced']} surfaced, {summary['skipped']} skipped "
-                    f"(by source: {summary['by_source']})")
-        logger.info("[DONE] surfaced jobs await human review (no auto-send).")
+                    f"(by source: {summary['by_source']})  m4_down={summary['m4_down']}")
+        if summary["m4_down"]:
+            logger.warning("[DONE] cycle ended early — M4 unreachable; NULL jobs "
+                           "retried next cycle.")
+        else:
+            logger.info("[DONE] surfaced jobs await human review (no auto-send).")
         return summary
     finally:
         session.close()
