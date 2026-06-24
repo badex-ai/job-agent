@@ -34,6 +34,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).parent.parent))
 
 from v2.gate_prompt import build_system_prompt
+from v2.model_profiles import profile_for, resolve_model
 from v2.qwen_gate import (DEFAULT_MODEL, MAX_DESCRIPTION_CHARS, GateError,
                           gate_job, ollama_url)
 
@@ -196,7 +197,7 @@ class TunnelDown(Exception):
 
 def evaluate(jobs: list[dict], system_prompt: str, transport=None,
              on_progress=None, abort_after_consecutive_errors=None,
-             model=None) -> dict:
+             model=None, options=None) -> dict:
     """Run the gate over jobs; return a metrics dict (every count has its n).
 
     Per-job failures (malformed output OR transport errors that survive
@@ -216,6 +217,8 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None,
     kw = {"transport": transport} if transport is not None else {}
     if model is not None:
         kw["model"] = model
+    if options:
+        kw["options"] = options
     results = []
     errors = []
     latencies = []
@@ -405,8 +408,13 @@ def main(argv=None):
                     help="abort if this many transport errors occur in a row "
                          "(tunnel died mid-run); 0 disables the breaker")
     ap.add_argument("--model", default=None,
-                    help="Ollama model tag (default: qwen_gate's qwen2.5:7b). "
-                         "e.g. --model qwen2.5:14b for the single-variable test")
+                    help="Ollama model tag or profile alias (e.g. qwen2.5:14b, "
+                         "qwen3:14b, qwen3:14b:think). Loads that model's "
+                         "documented-best sampling profile automatically.")
+    ap.add_argument("--no-think", dest="no_think", action="store_true",
+                    default=None,
+                    help="append /no_think to the system prompt (force "
+                         "Qwen3 out of thinking mode); overrides the profile")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = ap.parse_args(argv)
 
@@ -415,7 +423,17 @@ def main(argv=None):
     if args.limit is not None:
         jobs = jobs[:args.limit]
 
+    # Per-model profile: the model name selects its documented-best sampling
+    # settings (qwen2.5 -> certified greedy defaults; qwen3 -> temp 0.7 etc).
+    # An alias like qwen3:14b:think resolves to the real tag for the API call.
+    profile = profile_for(args.model) if args.model else {"options": {},
+                                                          "no_think": False}
+    real_model = resolve_model(args.model) if args.model else None
+    no_think = args.no_think if args.no_think is not None else profile["no_think"]
+
     system_prompt = build_system_prompt()
+    if no_think:
+        system_prompt = system_prompt + "\n\n/no_think"
     transport = stub_transport if args.stub_model else None
 
     mode = "STUB" if args.stub_model else "LIVE Qwen"
@@ -430,15 +448,17 @@ def main(argv=None):
             return 2
 
     model_label = args.model or "qwen2.5:7b (default)"
+    opts_label = profile["options"] or "gate defaults"
     print(f"[{mode}] evaluating {len(jobs)} jobs "
-          f"(offset {args.offset}, model {model_label}) ...", file=sys.stderr)
+          f"(offset {args.offset}, model {model_label}, "
+          f"no_think={no_think}, opts={opts_label}) ...", file=sys.stderr)
     progress = None if args.no_progress else _make_progress_printer()
     breaker = args.abort_after if args.abort_after > 0 else None
     t0 = time.time()
     try:
         m = evaluate(jobs, system_prompt, transport=transport,
                      on_progress=progress, abort_after_consecutive_errors=breaker,
-                     model=args.model)
+                     model=real_model, options=profile["options"] or None)
     except TunnelDown as e:
         print(f"\n[abort] {e}", file=sys.stderr)
         print(f"[abort] {len(e.partial)} jobs completed before the drop were "
@@ -446,7 +466,10 @@ def main(argv=None):
         return 3
     m["wall_clock_s"] = round(time.time() - t0, 1)
     m["mode"] = mode
-    m["model"] = args.model or DEFAULT_MODEL
+    m["model"] = args.model or DEFAULT_MODEL      # the alias asked for (provenance)
+    m["model_tag"] = real_model or DEFAULT_MODEL  # the real Ollama tag sent
+    m["sampling"] = profile["options"] or "gate defaults"
+    m["no_think"] = no_think
 
     args.out.write_text(json.dumps(m, indent=2))
 
