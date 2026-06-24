@@ -483,3 +483,40 @@ def test_main_stub_writes_valid_json(tmp_path):
         assert key in data
     assert data["n"] == 5
     assert data["mode"] == "STUB"
+
+
+# --- labeled-file loader (--labels held-out support) -----------------------
+
+def test_load_labeled_jobs_reads_bare_list(tmp_path):
+    p = tmp_path / "bare.json"
+    p.write_text(json.dumps([{"id": "1", "label": "SKIP"},
+                             {"id": "2", "label": "APPLY"}]))
+    jobs = eval_gate.load_labeled_jobs(p)
+    assert [j["label"] for j in jobs] == ["SKIP", "APPLY"]
+
+
+def test_load_labeled_jobs_reads_jobs_wrapper(tmp_path):
+    # the sealed held-out shape: {"jobs": [...]}
+    p = tmp_path / "wrap.json"
+    p.write_text(json.dumps({"sealed": True,
+                             "jobs": [{"id": "1", "label": "HOLD"}]}))
+    jobs = eval_gate.load_labeled_jobs(p)
+    assert len(jobs) == 1 and jobs[0]["label"] == "HOLD"
+
+
+def test_load_labeled_jobs_refuses_unlabeled(tmp_path):
+    # held-out file before labeling carries label: null -> must fail loudly,
+    # never silently score a null label
+    p = tmp_path / "unl.json"
+    p.write_text(json.dumps({"jobs": [{"id": "1", "label": None},
+                                      {"id": "2", "label": "SKIP"}]}))
+    with pytest.raises(SystemExit) as e:
+        eval_gate.load_labeled_jobs(p)
+    assert "no valid label" in str(e.value)
+
+
+def test_load_labeled_jobs_refuses_unknown_label(tmp_path):
+    p = tmp_path / "bad.json"
+    p.write_text(json.dumps([{"id": "1", "label": "MAYBE"}]))
+    with pytest.raises(SystemExit):
+        eval_gate.load_labeled_jobs(p)

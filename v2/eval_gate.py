@@ -42,6 +42,33 @@ REPO_ROOT = Path(__file__).resolve().parent.parent
 LABELS_PATH = REPO_ROOT / "data" / "labels.json"
 DEFAULT_OUT = REPO_ROOT / "data" / "eval_results.json"
 
+VALID_LABELS = {"APPLY", "CONSIDER", "HOLD", "SKIP"}
+
+
+def load_labeled_jobs(path: Path) -> list[dict]:
+    """Read a labeled job file and return the list of jobs.
+
+    Accepts both file shapes the project uses:
+      - data/labels.json    : a bare JSON list of job dicts
+      - heldout_*.json       : {"jobs": [...]} (the sealed held-out wrapper)
+
+    Every returned job MUST carry a valid `label` — scoring a null/unlabeled
+    job is meaningless and would silently corrupt FN/FP counts, so this refuses
+    rather than guesses. The held-out file ships with `label: null` until it is
+    hand-labeled; pointing the eval at it before labeling fails loudly here."""
+    raw = json.loads(path.read_text())
+    jobs = raw["jobs"] if isinstance(raw, dict) else raw
+    unlabeled = [j for j in jobs if j.get("label") not in VALID_LABELS]
+    if unlabeled:
+        ids = ", ".join(str(j.get("id")) for j in unlabeled[:5])
+        more = "" if len(unlabeled) <= 5 else f" (+{len(unlabeled) - 5} more)"
+        raise SystemExit(
+            f"{len(unlabeled)} of {len(jobs)} jobs in {path} have no valid "
+            f"label (e.g. {ids}{more}). Label them first "
+            f"(v2/labeling/label_heldout.py) — scoring unlabeled jobs is "
+            f"meaningless.")
+    return jobs
+
 SURFACE_LABELS = {"APPLY", "CONSIDER", "HOLD"}  # the act-set
 SURFACE_VERDICTS = {"surface", "surface_priority"}
 
@@ -415,10 +442,15 @@ def main(argv=None):
                     default=None,
                     help="append /no_think to the system prompt (force "
                          "Qwen3 out of thinking mode); overrides the profile")
+    ap.add_argument("--labels", type=Path, default=LABELS_PATH,
+                    help="labeled job file to score against (default: the 200 "
+                         "tuning labels). Point at data/heldout_unlabeled.json "
+                         "for the sealed held-out run. Accepts a bare list or a "
+                         "{'jobs': [...]} wrapper; all jobs must be labeled.")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
     args = ap.parse_args(argv)
 
-    jobs = json.loads(LABELS_PATH.read_text())  # read-only
+    jobs = load_labeled_jobs(args.labels)  # read-only
     jobs = jobs[args.offset:]
     if args.limit is not None:
         jobs = jobs[:args.limit]
