@@ -230,3 +230,47 @@ def test_menu_counts_partitions_by_verdict_and_status(env):
     assert counts["queue"] == 2      # prio + surf, both still 'new'
     assert counts["buried"] == 2     # only the undecided skips
     assert counts["applied"] == 1
+
+
+# --- menu accepts single-letter OR full-word entry -------------------------
+
+def test_menu_dispatch_maps_letter_and_word_to_same_view():
+    """Typing 'q' must go to the same place as 'queue' — single-letter entry is
+    the friction fix; both forms route to one function (None = exit)."""
+    d = cli._MENU_DISPATCH
+    assert d["q"] is d["queue"] is cli.run_queue
+    assert d["r"] is d["rescue"] is cli.run_rescue
+    assert d["f"] is d["followups"] is cli.run_followups
+    assert d["s"] is d["stats"] is cli.run_stats
+    assert d["x"] is None and d["exit"] is None
+
+
+# --- 'd' shows the description but is NOT a decision ------------------------
+
+def test_d_key_is_a_nav_key_not_a_decision(env):
+    """'d' (show description) must read nothing into the decisions table — it's
+    navigation, like o/n/b. If it leaked into the decision map it would write a
+    spurious label every time the user just wanted to read the posting."""
+    assert "d" in cli.ACTION_KEYS
+    assert "d" not in cli._KEY_TO_LABEL
+    s = env()
+    _seed(s, "j1", verdict="surface")
+    s.close()
+    ok, err = cli.apply_queue_action("j1", "d")
+    assert not ok and "not a decision key" in err
+    verify = env()
+    assert verify.query(Decision).count() == 0
+    verify.close()
+
+
+def test_show_description_handles_missing_and_present(monkeypatch):
+    """_show_description never crashes: a job with no description prints a notice;
+    a job with one renders without raising. (Driven headless; the pager is a
+    no-op to a non-tty.)"""
+    # the ENTER prompt mustn't block the test; monkeypatch auto-reverts after.
+    monkeypatch.setattr(cli.Prompt, "ask", staticmethod(lambda *a, **k: ""))
+    empty = Job(id="e1", title="T", company="C", description=None)
+    cli._show_description(empty)            # must not raise on missing description
+    full = Job(id="f1", title="T", company="C",
+               description="Kubernetes platform team. Node.js + Python.")
+    cli._show_description(full)             # must not raise on present description

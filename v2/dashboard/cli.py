@@ -48,7 +48,7 @@ console = Console()
 QUEUE_VERDICTS = ("surface_priority", "surface")
 
 # SPEC §5b: one-key actions. The four-way + navigation.
-ACTION_KEYS = ("a", "c", "h", "s", "o", "n", "b")
+ACTION_KEYS = ("a", "c", "h", "s", "d", "o", "n", "b")
 _KEY_TO_LABEL = {"a": "APPLY", "c": "CONSIDER", "h": "HOLD", "s": "SKIP"}
 
 # SPEC §5b skip tagging: the rubric's hard/semantic rule ids (S1..S6).
@@ -306,7 +306,8 @@ def run_queue() -> None:
             console.print(render_job(job, idx + 1, len(jobs), tiers))
             console.print(
                 "[dim]a[/dim] apply  [dim]c[/dim] consider  [dim]h[/dim] hold  "
-                "[dim]s[/dim] skip  [dim]o[/dim] open  [dim]n[/dim] next  [dim]b[/dim] back"
+                "[dim]s[/dim] skip  [dim]d[/dim] desc  [dim]o[/dim] open  "
+                "[dim]n[/dim] next  [dim]b[/dim] back"
             )
             key = Prompt.ask("Action", choices=list(ACTION_KEYS), default="n")
 
@@ -314,6 +315,9 @@ def run_queue() -> None:
                 return
             if key == "n":                  # defer: advance within this pass
                 idx += 1
+                continue
+            if key == "d":                  # read the full posting, stay on this job
+                _show_description(job)
                 continue
             if key == "o":
                 _open(job)
@@ -342,6 +346,22 @@ def run_queue() -> None:
                 console.print(f"[bold red]✗ {err}[/bold red]")
                 Prompt.ask("press ENTER", default="")
             break                           # decision made → re-query the live queue
+
+
+def _show_description(job: Job) -> None:
+    """Show the full job description on demand (SPEC §5b: 'description available
+    on demand'). The gate's reason is the hero element; the raw posting text sits
+    one keypress behind it so the user can read the source before deciding."""
+    text = (job.description or "").strip()
+    if not text:
+        console.print("[yellow]no description stored for this job[/yellow]")
+    else:
+        with console.pager():
+            console.print(Panel(
+                text,
+                title=f"{job.title or '—'} @ {job.company or '—'}  ·  full description",
+                border_style="cyan"))
+    Prompt.ask("press ENTER", default="")
 
 
 def _open(job: Job) -> None:
@@ -389,14 +409,17 @@ def run_rescue() -> None:
             console.print(render_skipped(job, idx + 1, len(jobs)))
             console.print(
                 "[dim]r[/dim] rescue (gate was wrong)  [dim]c[/dim] confirm skip  "
-                "[dim]o[/dim] open  [dim]n[/dim] next  [dim]b[/dim] back"
+                "[dim]d[/dim] desc  [dim]o[/dim] open  [dim]n[/dim] next  [dim]b[/dim] back"
             )
-            key = Prompt.ask("Action", choices=["r", "c", "o", "n", "b"], default="n")
+            key = Prompt.ask("Action", choices=["r", "c", "d", "o", "n", "b"], default="n")
 
             if key == "b":
                 return
             if key == "n":
                 idx += 1
+                continue
+            if key == "d":                  # read the full posting before judging the skip
+                _show_description(job)
                 continue
             if key == "o":
                 _open(job)
@@ -612,6 +635,17 @@ def menu_counts(session=None) -> dict:
             session.close()
 
 
+# single-letter OR full-word -> the view (None = exit). Defined here, below the
+# view functions, so every target exists when run() looks it up.
+_MENU_DISPATCH = {
+    "q": run_queue, "queue": run_queue,
+    "r": run_rescue, "rescue": run_rescue,
+    "f": run_followups, "followups": run_followups,
+    "s": run_stats, "stats": run_stats,
+    "x": None, "exit": None,
+}
+
+
 def run() -> None:
     """The daily dashboard: queue · rescue · followups · stats · exit (SPEC §5a).
     A thin dispatcher — each view owns its own loop."""
@@ -632,15 +666,23 @@ def run() -> None:
         stats_table.add_row("[cyan]Applied[/cyan]", f"[bold]{applied}[/bold]")
         console.print(Align.center(stats_table))
         console.print()
+        console.print(Align.center(
+            "[dim]q[/dim] queue  [dim]r[/dim] rescue  [dim]f[/dim] followups  "
+            "[dim]s[/dim] stats  [dim]x[/dim] exit"))
+        console.print()
 
-        choice = Prompt.ask("Choose",
-                            choices=["queue", "rescue", "followups", "stats", "exit"],
-                            default="queue")
-        if choice == "exit":
+        # accept the single letter OR the full word for each option (typing
+        # 'queue' every time is friction; 'q' goes straight there).
+        choice = Prompt.ask(
+            "Choose",
+            choices=["q", "queue", "r", "rescue", "f", "followups",
+                     "s", "stats", "x", "exit"],
+            default="q", show_choices=False)
+        action = _MENU_DISPATCH[choice]
+        if action is None:                       # exit
             console.print("[yellow]Goodbye! 👋[/yellow]")
             return
-        {"queue": run_queue, "rescue": run_rescue,
-         "followups": run_followups, "stats": run_stats}[choice]()
+        action()
 
 
 if __name__ == "__main__":
