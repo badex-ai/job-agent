@@ -282,10 +282,17 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None,
         nonlocal baseline_latency, cur_cooldown
         if not (pacing and hit_model):
             return
-        if dt is not None and (baseline_latency is None or dt < baseline_latency):
+        # dt is None on a GateError: the inference ran (so we still pace, to shed
+        # heat) but the latency is unusable — HOLD the current cooldown, do not
+        # anchor the baseline on it and do not relax. Relaxing here would cool the
+        # machine LESS after a malformed response, the wrong direction on a hot,
+        # backed-off run.
+        if dt is None:
+            time.sleep(cur_cooldown)
+            return
+        if baseline_latency is None or dt < baseline_latency:
             baseline_latency = dt
-        if baseline_latency is not None and dt is not None \
-                and dt > EVAL_THROTTLE_RATIO * baseline_latency:
+        if dt > EVAL_THROTTLE_RATIO * baseline_latency:
             cur_cooldown = min(cur_cooldown * 2, EVAL_COOLDOWN_MAX_S)
         else:
             cur_cooldown = max(cur_cooldown / 2, cooldown_s)
@@ -488,17 +495,24 @@ def main(argv=None):
                          "for the sealed held-out run. Accepts a bare list or a "
                          "{'jobs': [...]} wrapper; all jobs must be labeled.")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
-    ap.add_argument("--cooldown", type=float, default=0.0,
+    ap.add_argument("--cooldown", type=float, default=60.0,
                     help="seconds to sleep after each live gate call, to keep "
-                         "the M4 cool on a full held-out run (default 0 = off). "
-                         "Adaptive: backs off on latency creep, capped at "
-                         f"{EVAL_COOLDOWN_MAX_S:g}s (< keep_alive). Ignored for "
+                         "the M4 cool on a full held-out run (default 60; 0 "
+                         "disables). Adaptive: backs off on latency creep, capped "
+                         f"at {EVAL_COOLDOWN_MAX_S:g}s (< keep_alive). Ignored for "
                          "--stub-model. Thermal-only: does not change verdicts.")
     args = ap.parse_args(argv)
     if args.cooldown >= EVAL_COOLDOWN_MAX_S:
         print(f"[PACE] --cooldown {args.cooldown:g}s >= {EVAL_COOLDOWN_MAX_S:g}s "
               f"(near keep_alive) would thrash reloads; clamping.")
         args.cooldown = EVAL_COOLDOWN_MAX_S
+    # A live run at cooldown 0 reproduces the back-to-back saturation this pacing
+    # exists to prevent — the default is 60, so reaching 0 means it was set
+    # explicitly. Warn loudly rather than silently cook the M4.
+    if args.cooldown == 0 and not args.stub_model:
+        print("[PACE] WARNING: live run with --cooldown 0 — the gate host GPU "
+              "will run UNPACED (back-to-back saturation). Ctrl-C now if the M4 "
+              "is a machine you must keep cool.", file=sys.stderr)
 
     jobs = load_labeled_jobs(args.labels)  # read-only
     jobs = jobs[args.offset:]
