@@ -30,6 +30,7 @@ import argparse
 import json
 import logging
 import sys
+import time
 from datetime import datetime
 from pathlib import Path
 
@@ -46,6 +47,30 @@ logger = logging.getLogger("v2_loop")
 
 SCRAPE_FIELDS = ("id", "title", "company", "location", "is_remote",
                  "description", "apply_link", "job_url", "date_posted", "source")
+
+# --- Thermal pacing (M4 courtesy) --------------------------------------------
+# The gate host is an M4; a back-to-back 14B batch drives its GPU to
+# ~100% duty cycle and ~100°C sustained (measured 2026-07-11: qwen2.5:14b loads
+# 48/48 layers on the Metal GPU). The fix is NOT to offload layers to CPU (that
+# relocates heat to the shared die and slows every job); it is to PACE — the
+# workload is a latency-insensitive overnight drain, so we sleep between jobs
+# and let the heatsink shed heat in the gaps. Full GPU offload is retained; the
+# GPU does each job at full speed, just not continuously. Pacing lives here in
+# the caller because Ollama has no thermal/rate-limit knob of its own (verified
+# against ollama source, 2026-07-11) — it MUST be client-side.
+#
+# Adaptive arm: with SSH to the Mac closed, per-job latency is our only thermal
+# telemetry. Metal thermal throttling shows up as latency creep, so if a job
+# runs slower than THROTTLE_RATIO × the batch's opening baseline, we lengthen
+# the cooldown — a closed loop using data the gate already returns.
+GATE_COOLDOWN_S = 60.0      # sleep after each LIVE gate call (0 disables pacing)
+THROTTLE_RATIO = 1.5        # latency this-×-baseline => assume throttling
+# Cap the adaptive backoff strictly BELOW keep_alive ("5m"=300s in qwen_gate.py):
+# if the inter-job gap reached the unload timer, the model would race its own
+# expiry and each lost race adds a ~5.3s cold reload — which inflates latency,
+# which keeps the throttle detector pinned at max: a self-sustaining reload
+# thrash exactly when the system thinks it is being gentlest. 240s leaves margin.
+COOLDOWN_MAX_S = 240.0
 
 
 def _store_new_jobs(session, raw_jobs: list[dict]) -> int:
@@ -76,12 +101,17 @@ def _apply_verdict(job: Job, rec: dict) -> None:
 
 
 def gate_pending(session, *, offline: bool, model: str = GATE_MODEL,
-                 system_prompt=None, limit: int | None = None) -> dict:
+                 system_prompt=None, limit: int | None = None,
+                 cooldown_s: float = GATE_COOLDOWN_S) -> dict:
     """Gate every row with gate_verdict IS NULL. Returns a summary.
 
     `system_prompt` is built once (not per job) and passed through, so the
     same validated prompt scores the whole batch. offline=True uses the
-    honest surface-everything transport (no network)."""
+    honest surface-everything transport (no network).
+
+    Live batches PACE the M4: after each call that actually hit the model,
+    sleep `cooldown_s` so the GPU sheds heat (see module header). Offline runs
+    and hard-gate skips never touch the M4, so they are never paced."""
     transport = offline_transport if offline else None
     if system_prompt is None and not offline:
         from v2.gate_prompt import build_system_prompt
@@ -92,9 +122,15 @@ def gate_pending(session, *, offline: bool, model: str = GATE_MODEL,
         pending = pending.limit(limit)
     pending = pending.all()
 
+    # Pace only when we are actually driving the M4 (live + a real cooldown).
+    pacing = not offline and cooldown_s > 0
+    baseline_latency = None       # first live-call latency = the un-throttled ref
+    cur_cooldown = cooldown_s
+
     summary = {"gated": 0, "surfaced": 0, "skipped": 0, "by_source": {},
                "m4_down": False}
     for job in pending:
+        t0 = time.monotonic()
         try:
             rec = gate_one({"id": job.id, "title": job.title,
                             "company": job.company, "location": job.location,
@@ -111,17 +147,44 @@ def gate_pending(session, *, offline: bool, model: str = GATE_MODEL,
             logger.warning(f"[GATE] M4 unreachable, stopping cycle: {exc}")
             summary["m4_down"] = True
             break
+        elapsed = time.monotonic() - t0
         _apply_verdict(job, rec)
         summary["gated"] += 1
         summary["surfaced" if rec["surfaced"] else "skipped"] += 1
         src = rec["gate_source"]
         summary["by_source"][src] = summary["by_source"].get(src, 0) + 1
         session.commit()  # persist per job: a crash never loses gated work
+
+        # Pace AFTER a call that reached the M4. A hard-gate skip returns
+        # source='hard_gate' without any network call, so it needs no cooldown.
+        # NOTE 'error' IS paced: a GateError means the M4 ran the FULL inference
+        # and only the output parse failed — thermally identical to 'qwen'. A
+        # schema-drift streak overnight must not run back-to-back unpaced.
+        if pacing and src != "hard_gate":
+            # Adaptive: latency creep past THROTTLE_RATIO×baseline means the M4
+            # is getting hot enough to throttle, so back off harder; a job that
+            # returns to baseline relaxes it back toward the floor. Baseline is a
+            # running MINIMUM so a cold-load-inflated job-0 (or a hot pass-2
+            # anchor) self-corrects downward within a few jobs — an anchor that
+            # is too high only ever *under*-paces, and min() heals it. An 'error'
+            # latency can be pathological, so it never sets the baseline.
+            if src != "error":
+                baseline_latency = (elapsed if baseline_latency is None
+                                    else min(baseline_latency, elapsed))
+            if baseline_latency is not None and elapsed > THROTTLE_RATIO * baseline_latency:
+                cur_cooldown = min(cur_cooldown * 2, COOLDOWN_MAX_S)
+                logger.info(f"[PACE] latency {elapsed:.1f}s > "
+                            f"{THROTTLE_RATIO}×{baseline_latency:.1f}s baseline — "
+                            f"cooldown -> {cur_cooldown:.0f}s")
+            else:
+                cur_cooldown = max(cur_cooldown / 2, cooldown_s)
+            time.sleep(cur_cooldown)
     return summary
 
 
 def cycle(*, offline: bool, scrape: bool = True,
-          model: str = GATE_MODEL, limit: int | None = None) -> dict:
+          model: str = GATE_MODEL, limit: int | None = None,
+          cooldown_s: float = GATE_COOLDOWN_S) -> dict:
     """One pipeline cycle: (scrape ->) store new -> gate pending."""
     logger.info("=" * 60)
     logger.info(f"V2 CYCLE START — {datetime.utcnow().isoformat()} "
@@ -132,7 +195,8 @@ def cycle(*, offline: bool, scrape: bool = True,
         # short M4 outages this keeps the ungated pile from growing unboundedly —
         # we pay down what we owe before adding new jobs to gate.
         logger.info("[GATE] clearing NULL backlog before scraping...")
-        summary = gate_pending(session, offline=offline, model=model, limit=limit)
+        summary = gate_pending(session, offline=offline, model=model, limit=limit,
+                               cooldown_s=cooldown_s)
 
         stored = 0
         if scrape and not summary["m4_down"]:
@@ -147,7 +211,8 @@ def cycle(*, offline: bool, scrape: bool = True,
             # pass's counts into the summary). Skipped if the M4 was already found
             # down above — no point scraping into a dead gate.
             logger.info("[GATE] scoring newly-stored rows...")
-            second = gate_pending(session, offline=offline, model=model, limit=limit)
+            second = gate_pending(session, offline=offline, model=model, limit=limit,
+                                  cooldown_s=cooldown_s)
             for k in ("gated", "surfaced", "skipped"):
                 summary[k] += second[k]
             for src, n in second["by_source"].items():
@@ -183,14 +248,28 @@ def main(argv=None):
                     help="gate at most N pending rows (smoke testing)")
     ap.add_argument("--model", default=GATE_MODEL,
                     help=f"Ollama model tag (default {GATE_MODEL})")
+    ap.add_argument("--cooldown", type=float, default=GATE_COOLDOWN_S,
+                    help=f"seconds to sleep after each live gate call, pacing "
+                         f"the M4 (default {GATE_COOLDOWN_S:g}; 0 disables). "
+                         f"Adaptive: backs off on latency creep. Ignored offline.")
     args = ap.parse_args(argv)
+
+    # A cooldown at/above the 5m keep_alive lets the model unload between jobs,
+    # so every job pays a cold reload (thrash, and counterproductive heat). Clamp
+    # the floor under the adaptive cap, which is itself kept under keep_alive.
+    if args.cooldown >= COOLDOWN_MAX_S:
+        logger.warning(f"[PACE] --cooldown {args.cooldown:g}s >= {COOLDOWN_MAX_S:g}s "
+                       f"(near keep_alive) would thrash reloads; clamping to "
+                       f"{COOLDOWN_MAX_S:g}s.")
+        args.cooldown = COOLDOWN_MAX_S
 
     added = migrate_gate_columns()
     if added:
         logger.info(f"[migrate] added gate columns: {added}")
 
     run = lambda: cycle(offline=args.offline, scrape=not args.no_scrape,
-                        model=args.model, limit=args.limit)
+                        model=args.model, limit=args.limit,
+                        cooldown_s=args.cooldown)
 
     if args.once or args.no_scrape:
         run()
