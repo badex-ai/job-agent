@@ -44,6 +44,12 @@ DEFAULT_OUT = REPO_ROOT / "data" / "eval_results.json"
 
 VALID_LABELS = {"APPLY", "CONSIDER", "HOLD", "SKIP"}
 
+# Thermal pacing for a live held-out run (mirrors v2/loop.py): keep the M4's
+# GPU below saturation by sleeping between calls. 240s caps the adaptive backoff
+# strictly under the 5m keep_alive so the model never unloads mid-batch.
+EVAL_THROTTLE_RATIO = 1.5
+EVAL_COOLDOWN_MAX_S = 240.0
+
 
 def load_labeled_jobs(path: Path) -> list[dict]:
     """Read a labeled job file and return the list of jobs.
@@ -224,7 +230,7 @@ class TunnelDown(Exception):
 
 def evaluate(jobs: list[dict], system_prompt: str, transport=None,
              on_progress=None, abort_after_consecutive_errors=None,
-             model=None, options=None) -> dict:
+             model=None, options=None, cooldown_s=0.0) -> dict:
     """Run the gate over jobs; return a metrics dict (every count has its n).
 
     Per-job failures (malformed output OR transport errors that survive
@@ -240,7 +246,16 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None,
     transport errors occur back-to-back, raise TunnelDown — the tunnel has
     dropped and the rest of the batch would just be doomed timeouts. A
     successful job resets the streak; malformed output (GateError) is the
-    model's fault, not the tunnel's, so it does NOT count toward the breaker."""
+    model's fault, not the tunnel's, so it does NOT count toward the breaker.
+
+    `cooldown_s` (default 0.0 = off): sleep this long AFTER each job that hit
+    the model, to keep the M4 cool on a full 150-job held-out run (the biggest
+    sustained load on that machine). This is a THERMAL knob only — it changes
+    when calls happen, never the verdict — so a paced run and an unpaced run
+    score identically. Mirrors v2/loop.py's pacing; kept scoring-neutral by
+    sleeping at the end of the loop body, outside verdict computation. An
+    adaptive arm lengthens the cooldown when latency creeps past 1.5x a running
+    minimum (a throttling proxy), capped under the 5m keep_alive."""
     kw = {"transport": transport} if transport is not None else {}
     if model is not None:
         kw["model"] = model
@@ -251,19 +266,41 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None,
     latencies = []
     total = len(jobs)
     consecutive_errors = 0
+    pacing = cooldown_s > 0 and transport is None  # only when driving the live M4
+    baseline_latency = None
+    cur_cooldown = cooldown_s
 
     def _tick(done, title, info):
         if on_progress is not None:
             on_progress(done, total, {"title": title, **info})
+
+    def _pace(dt, *, hit_model):
+        # Sleep after a call that reached the M4, to shed GPU heat. A GateError
+        # (malformed output) still ran the full inference, so it paces too; a
+        # pathological latency never sets the baseline. Baseline is a running
+        # minimum, so a cold-load-inflated first job self-corrects downward.
+        nonlocal baseline_latency, cur_cooldown
+        if not (pacing and hit_model):
+            return
+        if dt is not None and (baseline_latency is None or dt < baseline_latency):
+            baseline_latency = dt
+        if baseline_latency is not None and dt is not None \
+                and dt > EVAL_THROTTLE_RATIO * baseline_latency:
+            cur_cooldown = min(cur_cooldown * 2, EVAL_COOLDOWN_MAX_S)
+        else:
+            cur_cooldown = max(cur_cooldown / 2, cooldown_s)
+        time.sleep(cur_cooldown)
 
     for i, j in enumerate(jobs, 1):
         t0 = time.time()
         try:
             v = _gate_with_retry(j, system_prompt, kw)
         except GateError as e:
+            dt = time.time() - t0
             errors.append({"id": j.get("id"), "title": j.get("title"),
                            "error": f"malformed: {e}"})
-            _tick(i, j.get("title"), {"error": "malformed", "dt": time.time() - t0})
+            _tick(i, j.get("title"), {"error": "malformed", "dt": dt})
+            _pace(None, hit_model=True)  # inference ran; pace but don't anchor on it
             continue
         except Exception as e:
             errors.append({"id": j.get("id"), "title": j.get("title"),
@@ -277,6 +314,8 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None,
                     f"{consecutive_errors} consecutive transport errors at "
                     f"job {i}/{total} — tunnel down, aborting",
                     partial=results)
+            # A transport error means the call likely did NOT complete on the
+            # GPU (timeout/refused), so it produced little heat — don't pace it.
             continue
         consecutive_errors = 0
         dt = time.time() - t0
@@ -296,6 +335,7 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None,
         })
         _tick(i, j.get("title"), {"verdict": eff_verdict,
                                   "label": j.get("label"), "dt": dt})
+        _pace(dt, hit_model=True)
 
     n = len(results)
     # confusion on the binary skip-vs-surface axis
@@ -448,7 +488,17 @@ def main(argv=None):
                          "for the sealed held-out run. Accepts a bare list or a "
                          "{'jobs': [...]} wrapper; all jobs must be labeled.")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--cooldown", type=float, default=0.0,
+                    help="seconds to sleep after each live gate call, to keep "
+                         "the M4 cool on a full held-out run (default 0 = off). "
+                         "Adaptive: backs off on latency creep, capped at "
+                         f"{EVAL_COOLDOWN_MAX_S:g}s (< keep_alive). Ignored for "
+                         "--stub-model. Thermal-only: does not change verdicts.")
     args = ap.parse_args(argv)
+    if args.cooldown >= EVAL_COOLDOWN_MAX_S:
+        print(f"[PACE] --cooldown {args.cooldown:g}s >= {EVAL_COOLDOWN_MAX_S:g}s "
+              f"(near keep_alive) would thrash reloads; clamping.")
+        args.cooldown = EVAL_COOLDOWN_MAX_S
 
     jobs = load_labeled_jobs(args.labels)  # read-only
     jobs = jobs[args.offset:]
@@ -490,7 +540,8 @@ def main(argv=None):
     try:
         m = evaluate(jobs, system_prompt, transport=transport,
                      on_progress=progress, abort_after_consecutive_errors=breaker,
-                     model=real_model, options=profile["options"] or None)
+                     model=real_model, options=profile["options"] or None,
+                     cooldown_s=args.cooldown)
     except TunnelDown as e:
         print(f"\n[abort] {e}", file=sys.stderr)
         print(f"[abort] {len(e.partial)} jobs completed before the drop were "
