@@ -196,6 +196,44 @@ def verify_evidence(
     return verdict, None
 
 
+# The stack/role TASTE rules the gate is measurably unreliable on (the design notes
+# §9.3; review 2026-07-14). S2 ("primary stack the candidate doesn't work in")
+# fires on OR-lists and on the candidate's own languages — a coin-flip. With a
+# HUMAN filter after the gate (manual apply, auto-send off), burying a good job
+# (FP) is the expensive error and a leaked skip (FN) is cheap. So when
+# `eligibility_only` is on, a skip whose ONLY basis is a taste rule is demoted to
+# `surface`: the human decides taste. S3 is NOT demoted — it measured 17/17 on
+# the held-out set — so only S2 is in TASTE_ONLY_RULES for now.
+TASTE_ONLY_RULES = {"S2"}
+# The objective eligibility rules a skip may still stand on. A skip that carries
+# ANY of these is NOT taste — it stays a skip.
+ELIGIBILITY_RULES = {"S1", "S3", "S4", "S5", "S6"}
+
+
+def apply_scope(verdict: str, tags: list[str] | None,
+                *, eligibility_only: bool) -> tuple[str, str | None]:
+    """Eligibility-only re-scope (review 2026-07-14). Client-side,
+    tag-keyed: when `eligibility_only` is True, demote a skip whose SOLE basis is
+    a taste rule (S2) to `surface` — the gate stops adjudicating stack/role fit
+    and hands it to the human + ensemble. A skip that also cites any eligibility
+    rule (S1/S3/S4/S5/S6) stands unchanged.
+
+    Returns (effective_verdict, demotion_reason|None). Off by default so the
+    baseline scoring path is byte-identical; `rescore --eligibility-only` and the
+    live `--eligibility-only` flag turn it on, and because it reads only the
+    saved tags it is judged OFFLINE against a prior run — no model call, no M4
+    heat. Runs AFTER verify_evidence (a fabricated-evidence skip is already
+    downgraded; this only re-scopes verdicts that survived that guard)."""
+    if not eligibility_only or verdict != "skip":
+        return verdict, None
+    tagset = set(tags or [])
+    is_taste_only = bool(tagset & TASTE_ONLY_RULES) and not (tagset & ELIGIBILITY_RULES)
+    if is_taste_only:
+        rule = ",".join(sorted(tagset & TASTE_ONLY_RULES))
+        return "surface", f"eligibility-only re-scope: taste rule {rule} → human decides"
+    return verdict, None
+
+
 def is_surface(verdict: str) -> bool:
     return verdict in SURFACE_VERDICTS
 
@@ -239,7 +277,8 @@ class TunnelDown(Exception):
 
 def evaluate(jobs: list[dict], system_prompt: str, transport=None,
              on_progress=None, abort_after_consecutive_errors=None,
-             model=None, options=None, cooldown_s=0.0) -> dict:
+             model=None, options=None, cooldown_s=0.0,
+             eligibility_only=False) -> dict:
     """Run the gate over jobs; return a metrics dict (every count has its n).
 
     Per-job failures (malformed output OR transport errors that survive
@@ -340,11 +379,14 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None,
         eff_verdict, downgrade = verify_evidence(
             raw_verdict, v.get("reasoning", ""), j.get("description", ""),
             tags=v.get("tags", []), title=j.get("title", ""))
+        eff_verdict, rescoped = apply_scope(
+            eff_verdict, v.get("tags", []), eligibility_only=eligibility_only)
         results.append({
             "id": j.get("id"), "title": j.get("title"),
             "label": j["label"], "verdict": eff_verdict,
             "raw_verdict": raw_verdict,
             "downgraded": downgrade,
+            "rescoped": rescoped,
             "confidence": v.get("confidence"), "tags": v.get("tags", []),
             "reasoning": v.get("reasoning", ""),
             "notes": (j.get("notes") or "")[:120],
@@ -353,6 +395,19 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None,
                                   "label": j.get("label"), "dt": dt})
         _pace(dt, hit_model=True)
 
+    return _metrics_from_results(results, errors, latencies)
+
+
+def _metrics_from_results(results: list[dict], errors: list[dict],
+                          latencies: list[float]) -> dict:
+    """Compute the scored metrics dict from per-job result records.
+
+    Pure function of `results` (each carries label + effective verdict + tags):
+    given the same records it returns the same metrics, with no network or
+    model call. `evaluate()` calls it after a live run; `rescore()` calls it
+    after re-deriving verdicts from a saved run's raw outputs. Keeping the
+    scoring in ONE place is what makes single-run/dual-score trustworthy — the
+    live path and the re-score path cannot compute FN/FP differently."""
     n = len(results)
     # confusion on the binary skip-vs-surface axis
     skip_labels = [r for r in results if r["label"] == "SKIP"]
@@ -405,6 +460,50 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None,
         "n_false_positives": len(fp),
         "tier_slice": tier_slice,
     }
+
+
+def rescore(prior: dict, jobs: list[dict], eligibility_only=False) -> dict:
+    """Re-derive metrics from a saved run's RAW model outputs, under the CURRENT
+    verify_evidence (i.e. the current S1_EXCLUSION_RE) and — when
+    `eligibility_only` is set — the eligibility-only re-scope, with no M4 call.
+
+    The point (review finding, 2026-07-08): a guard/regex change, and the
+    eligibility-only re-scope (2026-07-14), are pure client-side post-processing
+    of the model's `raw_verdict` + `reasoning` + `tags`. The model request is
+    byte-identical, so a saved run can be scored under a NEW guard/scope offline
+    — a perfectly paired baseline-vs-change comparison from ONE live run
+    (identical n, zero run-to-run nondeterminism, no heat on the gate host).
+
+    `prior` is a results dict written by evaluate() (must carry per-job
+    raw_verdict/reasoning/tags). `jobs` is the labeled file the run scored —
+    description/title rejoin by id, since verify_evidence needs the real text to
+    check the quote is a genuine substring. A prior job whose id is absent from
+    `jobs` is a mismatch and fails loudly rather than silently mis-scoring."""
+    by_id = {str(j.get("id")): j for j in jobs}
+    results = []
+    for r in prior.get("results", []):
+        jid = str(r.get("id"))
+        job = by_id.get(jid)
+        if job is None:
+            raise SystemExit(
+                f"rescore: job id {jid!r} in the saved run is not in the labels "
+                f"file — the saved run and the labels do not match.")
+        eff, downgrade = verify_evidence(
+            r["raw_verdict"], r.get("reasoning", ""),
+            job.get("description", ""), tags=r.get("tags", []),
+            title=job.get("title", ""))
+        eff, rescoped = apply_scope(
+            eff, r.get("tags", []), eligibility_only=eligibility_only)
+        results.append({**r, "verdict": eff, "downgraded": downgrade,
+                        "rescoped": rescoped})
+    # Re-scoring changes only the verdict; the saved run's errors/latencies are
+    # carried through unchanged (they describe the live run, not the scoring).
+    latencies = [prior["latency_avg_s"]] if prior.get("latency_avg_s") else []
+    m = _metrics_from_results(results, prior.get("errors", []), latencies)
+    # latency_avg_s from a single carried value is meaningless — null it so no
+    # one reads a re-score's latency as the live run's.
+    m["latency_avg_s"] = prior.get("latency_avg_s")
+    return m
 
 
 _VERDICT_MARK = {"skip": "SKIP", "surface": "surf", "surface_priority": "SURF+"}
@@ -504,6 +603,20 @@ def main(argv=None):
                          "for the sealed held-out run. Accepts a bare list or a "
                          "{'jobs': [...]} wrapper; all jobs must be labeled.")
     ap.add_argument("--out", type=Path, default=DEFAULT_OUT)
+    ap.add_argument("--rescore", type=Path, default=None,
+                    help="re-score a SAVED results file under the current guard "
+                         "(current S1_EXCLUSION_RE) with NO model call. Pairs a "
+                         "regex/guard change against a single live run offline — "
+                         "no M4, no nondeterminism. Reads the run from this path "
+                         "and the labels from --labels; writes to --out.")
+    ap.add_argument("--eligibility-only", dest="eligibility_only",
+                    action="store_true",
+                    help="eligibility-only re-scope: demote a skip whose ONLY "
+                         "basis is a taste rule (S2) to surface — the human "
+                         "decides stack/role fit (the design notes is amended for "
+                         "the manual-apply workflow). Tag-keyed post-processing, "
+                         "so it composes with --rescore to judge the re-scope "
+                         "OFFLINE against a saved run (no M4 heat).")
     ap.add_argument("--cooldown", type=float, default=60.0,
                     help="seconds to sleep after each live gate call, to keep "
                          "the M4 cool on a full held-out run (default 60; 0 "
@@ -527,6 +640,24 @@ def main(argv=None):
     jobs = jobs[args.offset:]
     if args.limit is not None:
         jobs = jobs[:args.limit]
+
+    # --rescore: offline re-score of a saved run under the current guard. No
+    # preflight, no model, no pacing — it never touches the M4. Returns early.
+    if args.rescore is not None:
+        prior = json.loads(args.rescore.read_text())
+        m = rescore(prior, jobs, eligibility_only=args.eligibility_only)
+        scope = " + eligibility-only" if args.eligibility_only else ""
+        m["mode"] = f"RESCORE (offline){scope}"
+        m["rescored_from"] = str(args.rescore)
+        m["eligibility_only"] = args.eligibility_only
+        m["model"] = prior.get("model")
+        m["model_tag"] = prior.get("model_tag")
+        args.out.write_text(json.dumps(m, indent=2))
+        print(f"[RESCORE] {args.rescore.name} under current guard{scope}: "
+              f"FN={m['n_false_negatives']} FP={m['n_false_positives']} "
+              f"skip_recall={m['skip_recall']} (n={m['n']}) -> {args.out}",
+              file=sys.stderr)
+        return 0
 
     # Per-model profile: the model name selects its documented-best sampling
     # settings (qwen2.5 -> certified greedy defaults; qwen3 -> temp 0.7 etc).
@@ -564,7 +695,8 @@ def main(argv=None):
         m = evaluate(jobs, system_prompt, transport=transport,
                      on_progress=progress, abort_after_consecutive_errors=breaker,
                      model=real_model, options=profile["options"] or None,
-                     cooldown_s=args.cooldown)
+                     cooldown_s=args.cooldown,
+                     eligibility_only=args.eligibility_only)
     except TunnelDown as e:
         print(f"\n[abort] {e}", file=sys.stderr)
         print(f"[abort] {len(e.partial)} jobs completed before the drop were "
@@ -576,6 +708,7 @@ def main(argv=None):
     m["model_tag"] = real_model or DEFAULT_MODEL  # the real Ollama tag sent
     m["sampling"] = profile["options"] or "gate defaults"
     m["no_think"] = no_think
+    m["eligibility_only"] = args.eligibility_only
 
     args.out.write_text(json.dumps(m, indent=2))
 

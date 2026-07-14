@@ -516,6 +516,139 @@ def test_fabricated_quote_does_not_count_as_caught_skip():
     assert m["n_false_negatives"] == 1
 
 
+# --- rescore: single-run/dual-score (review finding 2026-07-08) --------
+
+def test_rescore_reproduces_a_live_run_exactly():
+    # THE INVARIANT: re-scoring a saved run under the SAME guard must reproduce
+    # that run's own metrics. This is what makes single-run/dual-score
+    # trustworthy — the rescore path and the live path share one scorer, so an
+    # unchanged guard cannot change FN/FP. If this ever fails, rescore has
+    # diverged from evaluate() and no rescored delta can be believed.
+    jobs = make_jobs([("A", "SKIP"), ("B", "APPLY"), ("C", "SKIP"), ("D", "HOLD")])
+    t = transport_returning({"A": "skip", "B": "surface", "C": "surface", "D": "skip"})
+    live = eval_gate.evaluate(jobs, "sys", transport=t)
+    # feed the live run's own output back through rescore, same jobs/guard
+    again = eval_gate.rescore(live, jobs)
+    for k in ("n", "n_false_negatives", "n_false_positives",
+              "skip_recall", "skip_precision", "surface_recall"):
+        assert again[k] == live[k], f"{k}: rescore {again[k]} != live {live[k]}"
+
+
+def test_rescore_reapplies_the_current_guard_to_raw_output():
+    # rescore must re-derive the verdict from raw_verdict via the CURRENT
+    # verify_evidence, not just copy the saved effective verdict. Here the saved
+    # run has raw_verdict='skip' with an S1 quote that names a place but states
+    # NO exclusion — the current guard downgrades it, so rescore must turn this
+    # SKIP-labeled job into a leaked FN even though the saved 'verdict' was skip.
+    jobs = [{"id": 1, "title": "Dev", "company": "", "location": "",
+             "description": "Remote. Office in Lima, Peru.", "label": "SKIP",
+             "notes": ""}]
+    prior = {
+        "results": [{
+            "id": 1, "title": "Dev", "label": "SKIP",
+            "verdict": "skip",                 # what the OLD guard recorded
+            "raw_verdict": "skip",
+            "reasoning": "Disqualifying rule: S1.\nEvidence: 'Lima, Peru'",
+            "tags": ["S1"], "downgraded": None,
+        }],
+        "errors": [], "latency_avg_s": 5.0,
+    }
+    m = eval_gate.rescore(prior, jobs)
+    # bare place mention -> current guard downgrades -> leaked SKIP
+    assert m["n_downgraded_bad_evidence"] == 1
+    assert m["n_false_negatives"] == 1
+
+
+def test_rescore_fails_loudly_on_id_mismatch():
+    prior = {"results": [{"id": 999, "title": "X", "label": "SKIP",
+                          "verdict": "skip", "raw_verdict": "skip",
+                          "reasoning": "", "tags": []}],
+             "errors": [], "latency_avg_s": None}
+    with pytest.raises(SystemExit):
+        eval_gate.rescore(prior, make_jobs([("A", "SKIP")]))  # id 0, not 999
+
+
+# --- eligibility-only re-scope (review 2026-07-14) ---------------
+# The gate stops adjudicating stack/role TASTE (S2): a skip whose only basis is
+# S2 is demoted to surface for the human. S3 is NOT demoted (17/17 on held-out).
+
+def test_apply_scope_is_a_no_op_when_off():
+    # the DEFAULT must be byte-identical to before: eligibility_only off leaves
+    # every verdict — including a sole-S2 skip — untouched. This is what keeps
+    # the baseline scoring path unchanged until the flag is explicitly set.
+    v, why = eval_gate.apply_scope("skip", ["S2"], eligibility_only=False)
+    assert v == "skip" and why is None
+
+
+def test_apply_scope_demotes_sole_s2_skip():
+    v, why = eval_gate.apply_scope("skip", ["S2"], eligibility_only=True)
+    assert v == "surface" and "S2" in why
+
+
+def test_apply_scope_keeps_eligibility_skips():
+    # a skip citing ANY eligibility rule stands — the re-scope only sheds taste.
+    for tag in ("S1", "S3", "S4", "S5", "S6"):
+        v, why = eval_gate.apply_scope("skip", [tag], eligibility_only=True)
+        assert v == "skip" and why is None, f"{tag} must not be demoted"
+
+
+def test_apply_scope_keeps_s2_when_an_eligibility_rule_co_fires():
+    # a skip tagged S2 AND S3 stands on S3 — S3 is a surviving eligibility basis,
+    # so the taste rule co-occurring must not pull the whole skip down.
+    v, why = eval_gate.apply_scope("skip", ["S2", "S3"], eligibility_only=True)
+    assert v == "skip" and why is None
+
+
+def test_apply_scope_never_touches_a_surface_verdict():
+    v, why = eval_gate.apply_scope("surface", ["S2"], eligibility_only=True)
+    assert v == "surface" and why is None
+
+
+def test_eligibility_only_flips_a_buried_taste_job_to_a_recovered_surface():
+    # end-to-end through evaluate(): a CONSIDER job the gate skips on S2 (a buried
+    # good job = FP) is recovered to surface under eligibility_only, dropping FP.
+    jobs = make_jobs([("KEEP", "CONSIDER"), ("GEO", "SKIP")])
+    def t(url, payload, timeout):
+        tag = "S2" if "KEEP" in payload["prompt"] else "S1"
+        ev = "must be authorized to work in the US" if tag == "S1" else DISQUALIFYING_TOKEN
+        desc_ev = f"\nEvidence: '{ev}'"
+        return {"response": json.dumps({
+            "reasoning": f"Disqualifying rule: {tag}.{desc_ev}",
+            "verdict": "skip", "confidence": 50, "tags": [tag]})}
+    base = eval_gate.evaluate(jobs, "sys", transport=t)
+    resc = eval_gate.evaluate(jobs, "sys", transport=t, eligibility_only=True)
+    # baseline buries the CONSIDER (S2) job -> 1 FP; eligibility-only recovers it
+    assert base["n_false_positives"] == 1
+    assert resc["n_false_positives"] == 0
+
+
+def test_rescore_eligibility_only_reproduces_a_live_eligibility_only_run():
+    # THE COMPOSITION INVARIANT: judging the re-scope OFFLINE (rescore a saved
+    # baseline run with eligibility_only) must equal running the gate live with
+    # eligibility_only. This is what lets us test the re-scope against a saved
+    # held-out run with zero M4 heat — if it ever fails, the offline number is a
+    # lie and we'd have to spend a live run to trust it.
+    jobs = make_jobs([("KEEP", "CONSIDER"), ("GEO", "SKIP"), ("OK", "APPLY")])
+    def t(url, payload, timeout):
+        p = payload["prompt"]
+        if "KEEP" in p: tag, verdict = "S2", "skip"
+        elif "GEO" in p: tag, verdict = "S1", "skip"
+        else: return {"response": json.dumps({
+            "reasoning": "clean", "verdict": "surface", "confidence": 50, "tags": []})}
+        ev = "must be authorized to work in the US" if tag == "S1" else DISQUALIFYING_TOKEN
+        return {"response": json.dumps({
+            "reasoning": f"Disqualifying rule: {tag}.\nEvidence: '{ev}'",
+            "verdict": verdict, "confidence": 50, "tags": [tag]})}
+    # one live baseline run (no re-scope), then judge the re-scope two ways
+    baseline = eval_gate.evaluate(jobs, "sys", transport=t)
+    live_rescope = eval_gate.evaluate(jobs, "sys", transport=t, eligibility_only=True)
+    offline_rescope = eval_gate.rescore(baseline, jobs, eligibility_only=True)
+    for k in ("n", "n_false_negatives", "n_false_positives",
+              "skip_recall", "skip_precision", "surface_recall"):
+        assert offline_rescope[k] == live_rescope[k], (
+            f"{k}: offline {offline_rescope[k]} != live {live_rescope[k]}")
+
+
 # --- stub transport (the offline VERIFY path) ------------------------------
 
 def test_stub_transport_skips_on_hard_marker():
