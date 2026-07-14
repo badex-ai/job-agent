@@ -434,6 +434,62 @@ def test_s1_exclusion_check_only_applies_to_s1():
     assert eff == "skip" and why is None
 
 
+def test_s1_guard_keeps_non_english_exclusion():
+    # held-out (2026-07-08): the model correctly caught a Spanish residency
+    # exclusion, but the English-only S1 regex read it as a bare place mention
+    # and downgraded a CORRECT skip to surface — an FN leak. A residency
+    # exclusion in any language must keep the skip.
+    reasoning = ("Disqualifying rule: S1.\n"
+                 "Evidence: 'Solo residentes en Perú, por la entrega de equipos.'")
+    desc = "Analista Backend. Solo residentes en Perú, por la entrega de equipos."
+    eff, why = eval_gate.verify_evidence("skip", reasoning, desc, tags=["S1"])
+    assert eff == "skip" and why is None
+
+
+def test_s1_guard_keeps_based_locally_in_exclusion():
+    # held-out (2026-07-08): 'based locally in the Philippines' is an explicit
+    # exclusion, but the regex only had 'based in'/'located in', so 'based
+    # locally in' slipped through and the correct skip was downgraded.
+    reasoning = ("Disqualifying rule: S1.\n"
+                 "Evidence: 'we require candidates to be based locally in the Philippines'")
+    desc = ("Full Stack Engineer. This role is remote; however, we require "
+            "candidates to be based locally in the Philippines.")
+    eff, why = eval_gate.verify_evidence("skip", reasoning, desc, tags=["S1"])
+    assert eff == "skip" and why is None
+
+
+def test_s1_guard_still_downgrades_bare_place_after_extension():
+    # guard the tripwire: the non-English/verb additions must NOT make a bare
+    # place mention count as an exclusion. This is the FN->FP oscillation the
+    # the design notes lesson warns has no equilibrium — proving it stays inert.
+    reasoning = "Disqualifying rule: S1.\nEvidence: 'Lima, Perú'"
+    desc = "Backend Developer. Our office is in Lima, Perú. Fully remote worldwide."
+    eff, why = eval_gate.verify_evidence("skip", reasoning, desc, tags=["S1"])
+    assert eff == "surface" and why is not None
+
+
+def test_s1_guard_downgrades_bare_residentes():
+    # regression (review, 2026-07-08): the Spanish arm must be
+    # noun+preposition ('residentes de/en'), NOT the bare noun 'residentes',
+    # which matched benign inclusions ('residentes y no residentes bienvenidos')
+    # and non-eligibility domains ('app para médicos residentes'). A bare
+    # 'residentes' with no scoping preposition must stay a mention -> downgrade.
+    reasoning = "Disqualifying rule: S1.\nEvidence: 'una app para residentes'"
+    desc = "Full Stack Developer. Construimos una app para residentes. Remote."
+    eff, why = eval_gate.verify_evidence("skip", reasoning, desc, tags=["S1"])
+    assert eff == "surface" and why is not None
+
+
+def test_s1_guard_keeps_solo_para_residentes_variant():
+    # the tightened Spanish arm must still catch the 'solo PARA residentes en X'
+    # phrasing, not only the bare 'solo residentes en X' — both are common in
+    # Spanish job ads and both are real residency exclusions.
+    reasoning = "Disqualifying rule: S1.\nEvidence: 'Solo para residentes en Perú'"
+    desc = "Backend. Solo para residentes en Perú, por la entrega de equipos."
+    eff, why = eval_gate.verify_evidence("skip", reasoning, desc, tags=["S1"])
+    assert eff == "skip" and why is None
+
+
 def test_guard_ignores_surface_verdicts():
     eff, why = eval_gate.verify_evidence("surface", "anything", "anything")
     assert eff == "surface" and why is None

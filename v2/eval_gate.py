@@ -117,7 +117,16 @@ def extract_evidence(reasoning: str) -> str | None:
 # of these markers; without one, the quote does not prove restriction.
 S1_EXCLUSION_RE = re.compile(
     r"\bonly\b|\bmust be\b|authoriz|\beligib|citizens?\b|\brequired to (be|reside|live)\b|"
-    r"\bbased in\b|\blocated in\b|\bno sponsor|work authoriz|right to work\b",
+    r"\bbased in\b|\blocated in\b|\bno sponsor|work authoriz|right to work\b|"
+    # Exclusion phrasings proven-missed on the held-out set (2026-07-08): either
+    # restriction verbs or noun+preposition scoping phrases (mirroring the
+    # English 'residents of'), never a BARE place/population token — a bare noun
+    # would count a mention as a restriction, the exact case this guard exists to
+    # reject (see test_s1_guard_downgrades_bare_residentes). The Spanish arm
+    # 'residentes (de|en)' catches 'Solo residentes en Perú' / 'Solo para
+    # residentes en Perú' while rejecting bare 'app para residentes'.
+    r"\bbased locally in\b|\bresidents? of\b|\bmust reside\b|\breside in\b|"
+    r"\bsolo residentes\b|\bresidentes (de|en)\b",
     re.IGNORECASE)
 
 
