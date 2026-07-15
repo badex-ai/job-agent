@@ -8,6 +8,8 @@ publicly accessible, no authentication, no account risk.
 import logging
 import time
 import json
+import urllib.parse
+import urllib.request
 import requests
 from bs4 import BeautifulSoup
 from datetime import datetime
@@ -131,82 +133,154 @@ def scrape_linkedin(keyword: str, start: int = 0) -> List[Dict]:
         return []
 
 
+def _indeed_pass(keyword: str, country: str, wanted: int,
+                 remote_only: bool) -> List[Dict]:
+    """One Indeed query against one country's Indeed domain.
+
+    Do NOT add hours_old. jobspy builds Indeed's filters as an if/elif chain
+    (indeed/__init__.py: "If hours_old is provided, composite filter for
+    job_type/is_remote is not possible") where hours_old wins and is_remote is
+    silently dropped — you get recent on-site jobs instead of remote ones, with
+    no error. Freshness is the caller's problem; ids make a repeat a no-op.
+    """
+    from jobspy import scrape_jobs
+    results = scrape_jobs(
+        site_name=["indeed"],
+        search_term=keyword,
+        country_indeed=country,
+        results_wanted=wanted,
+        is_remote=remote_only,
+        description_format="markdown",
+    )
+    jobs = []
+    for _, row in results.iterrows():
+        jobs.append({
+            "id": f"indeed_{row.get('id', '')}",
+            "title": row.get("title", ""),
+            "company": row.get("company", ""),
+            "location": row.get("location", "") or country,
+            "job_url": row.get("job_url", ""),
+            "apply_link": row.get("job_url", ""),
+            "date_posted": str(row.get("date_posted", "")),
+            "description": row.get("description", ""),
+            "source": "indeed",
+            "is_remote": bool(remote_only),
+        })
+    return jobs
+
+
+# (country, results_wanted, remote_only). Indeed is per-country — there is no
+# worldwide domain, and country_indeed="worldwide" returns nothing, so "the
+# whole market" is spelled out as the countries that actually post remote roles.
+# The home country is NOT remote-filtered: the candidate lives there, so onsite and hybrid are real
+# options, and Indeed's home-country index had almost nothing tagged remote anyway
+# (measured: bare=5 jobs, is_remote=True=0). Everywhere else is remote-only —
+# the candidate cannot commute to Utah.
+INDEED_PASSES = [
+    ("home-country", 25, False),
+    ("usa", 20, True),
+    ("uk", 15, True),
+    ("canada", 10, True),
+]
+
+
 def scrape_indeed(keyword: str) -> List[Dict]:
-    """
-    Scrape Indeed using JobSpy — best scraper, no rate limiting.
-    Falls back gracefully if jobspy not installed.
-    """
-    try:
-        from jobspy import scrape_jobs
-        results = scrape_jobs(
-            site_name=["indeed"],
-            search_term=keyword,
-            location="Worldwide",
-            results_wanted=25,
-            hours_old=2,
-            is_remote=True,
-            job_type="internship",
-            description_format="markdown",
-        )
-        jobs = []
-        for _, row in results.iterrows():
-            jobs.append({
-                "id": f"indeed_{row.get('id', '')}",
-                "title": row.get("title", ""),
-                "company": row.get("company", ""),
-                "location": row.get("location", ""),
-                "job_url": row.get("job_url", ""),
-                "apply_link": row.get("job_url", ""),
-                "date_posted": str(row.get("date_posted", "")),
-                "description": row.get("description", ""),
-                "source": "indeed",
-                "is_remote": True,
-            })
-        logger.info(f"Indeed [{keyword}] → {len(jobs)} jobs")
-        return jobs
-    except ImportError:
-        logger.warning("jobspy not installed — skipping Indeed. Run: pip install python-jobspy")
-        return []
-    except Exception as e:
-        logger.error(f"Indeed scrape failed for [{keyword}]: {e}")
-        return []
+    """Indeed: everything local to the home country, plus remote roles abroad."""
+    jobs, seen = [], set()
+    for country, wanted, remote_only in INDEED_PASSES:
+        try:
+            found = _indeed_pass(keyword, country, wanted, remote_only)
+        except ImportError:
+            logger.warning("jobspy not installed — skipping Indeed. "
+                           "Run: pip install python-jobspy")
+            return []
+        except Exception as e:
+            logger.error(f"Indeed [{keyword}] {country} failed: {e}")
+            continue
+        new = [j for j in found if j["id"] not in seen]
+        seen.update(j["id"] for j in new)
+        jobs.extend(new)
+        logger.info(f"Indeed [{keyword}] {country}"
+                    f"{'' if remote_only else ' (any)'} → "
+                    f"{len(found)} ({len(new)} new)")
+    logger.info(f"Indeed [{keyword}] → {len(jobs)} jobs total")
+    return jobs
 
 
-def scrape_wellfound(keyword: str) -> List[Dict]:
+def _api_get(url: str, timeout: float = 25.0):
+    req = urllib.request.Request(url, headers={"User-Agent": HEADERS["User-Agent"]})
+    with urllib.request.urlopen(req, timeout=timeout) as resp:
+        return json.loads(resp.read().decode("utf-8"))
+
+
+def scrape_remotive(keyword: str) -> List[Dict]:
+    """Remote-worldwide roles from Remotive's public API.
+
+    This is the slot Wellfound used to occupy — remote startup/tech roles — but
+    served by a board that publishes a documented, key-less API for exactly this
+    use. (Wellfound has no public API and its robots.txt disallows /*?role=* and
+    /*?jobId=*, i.e. every URL a scraper would need; the only working scrapers
+    drive a headless browser against its private GraphQL. Not a dependency worth
+    having.) Remotive asks for attribution and roughly 2 req/min, so keep the
+    keyword list short and let ids dedupe.
+
+    Descriptions arrive inline, so unlike the LinkedIn path there is no per-job
+    fetch to be throttled on — the whole 429-blank-row failure mode is absent.
     """
-    Scrape Wellfound (formerly AngelList Talent) using JobSpy.
-    Great for startup jobs and early-stage companies.
-    """
+    url = ("https://remotive.com/api/remote-jobs?limit=25&search="
+           + urllib.parse.quote(keyword))
     try:
-        from jobspy import scrape_jobs
-        results = scrape_jobs(
-            site_name=["wellfound"],
-            search_term=keyword,
-            location="Worldwide",
-            results_wanted=15,
-            hours_old=2,
-            is_remote=True,
-            description_format="markdown",
-        )
-        jobs = []
-        for _, row in results.iterrows():
-            jobs.append({
-                "id": f"wellfound_{row.get('id', '')}",
-                "title": row.get("title", ""),
-                "company": row.get("company", ""),
-                "location": row.get("location", ""),
-                "job_url": row.get("job_url", ""),
-                "apply_link": row.get("job_url", ""),
-                "date_posted": str(row.get("date_posted", "")),
-                "description": row.get("description", ""),
-                "source": "wellfound",
-                "is_remote": True,
-            })
-        logger.info(f"Wellfound [{keyword}] → {len(jobs)} jobs")
-        return jobs
+        payload = _api_get(url)
     except Exception as e:
-        logger.debug(f"Wellfound scrape skipped for [{keyword}]: {e}")
+        logger.error(f"Remotive [{keyword}] failed: {e}")
         return []
+    jobs = []
+    for row in payload.get("jobs", []):
+        jobs.append({
+            "id": f"remotive_{row.get('id', '')}",
+            "title": row.get("title", ""),
+            "company": row.get("company_name", ""),
+            # Remotive's location is an eligibility restriction ("Europe, UK"),
+            # which is exactly what the gate's S1 rule reads. Keep it verbatim.
+            "location": row.get("candidate_required_location", "") or "Remote",
+            "job_url": row.get("url", ""),
+            "apply_link": row.get("url", ""),
+            "date_posted": str(row.get("publication_date", "")),
+            "description": row.get("description", ""),
+            "source": "remotive",
+            "is_remote": True,
+        })
+    logger.info(f"Remotive [{keyword}] → {len(jobs)} jobs")
+    return jobs
+
+
+def scrape_himalayas(keyword: str) -> List[Dict]:
+    """Remote-worldwide roles from Himalayas' public API (free, no key)."""
+    url = ("https://himalayas.app/jobs/api?limit=25&search="
+           + urllib.parse.quote(keyword))
+    try:
+        payload = _api_get(url)
+    except Exception as e:
+        logger.error(f"Himalayas [{keyword}] failed: {e}")
+        return []
+    jobs = []
+    for row in payload.get("jobs", []):
+        restrictions = row.get("locationRestrictions") or []
+        jobs.append({
+            # guid is the canonical job URL; it is the only stable id here.
+            "id": f"himalayas_{row.get('guid', '')}",
+            "title": row.get("title", ""),
+            "company": row.get("companyName", ""),
+            "location": ", ".join(restrictions) if restrictions else "Remote",
+            "job_url": row.get("guid", ""),
+            "apply_link": row.get("applicationLink", "") or row.get("guid", ""),
+            "date_posted": str(row.get("pubDate", "")),
+            "description": row.get("description", ""),
+            "source": "himalayas",
+            "is_remote": True,
+        })
+    logger.info(f"Himalayas [{keyword}] → {len(jobs)} jobs")
+    return jobs
 
 
 def scrape_linkedin_jobs(keyword: str) -> List[Dict]:
@@ -271,13 +345,15 @@ def run_scrape() -> List[Dict]:
                 all_jobs.append(job)
         time.sleep(2)
 
-        # Wellfound (startups)
-        wellfound_jobs = scrape_wellfound(keyword)
-        for job in wellfound_jobs:
-            if job["id"] not in seen_ids:
-                seen_ids.add(job["id"])
-                all_jobs.append(job)
-        time.sleep(2)
+        # Remote-worldwide boards. Both publish a free, key-less API and return
+        # the description inline, so neither can produce the throttled blank
+        # rows the LinkedIn per-job fetch is prone to.
+        for fetch in (scrape_remotive, scrape_himalayas):
+            for job in fetch(keyword):
+                if job["id"] not in seen_ids:
+                    seen_ids.add(job["id"])
+                    all_jobs.append(job)
+            time.sleep(2)
 
         # LinkedIn JobSpy (fallback if guest API fails)
         linkedin_fallback = scrape_linkedin_jobs(keyword)
