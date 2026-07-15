@@ -11,9 +11,15 @@ writes. The dicts are JSON-serialisable so the server can inject them straight i
 the page.
 """
 import json
+from pathlib import Path
 from typing import Dict, List, Optional
 
 from shared.database.models import Job, Decision, get_session
+
+# The CVs the picker offers, read from disk rather than hardcoded, so the web
+# code names no specific CV (calibration seam, plan §6). data/ sits at the repo
+# root: queries.py is v2/webapp/queries.py, so three parents up is the root.
+_DATA_DIR = Path(__file__).resolve().parents[2] / "data"
 
 # The rubric's four-way label space (matches decisions.HUMAN_LABELS). Kept in this
 # order so buckets render Apply-first.
@@ -105,3 +111,15 @@ def get_classified_jobs(session=None) -> Dict[str, List[dict]]:
 def bucket_counts(classified: Dict[str, List[dict]]) -> Dict[str, int]:
     """Live per-bucket counts for the tab labels."""
     return {b: len(classified.get(b, [])) for b in BUCKETS}
+
+
+def list_cvs(data_dir: Path = _DATA_DIR) -> List[str]:
+    """The CV names offered by the picker: `data/cv_*.txt` stems, sorted.
+
+    Returns e.g. ["cv_devops", "cv_frontend", "cv_fullstack"]. A missing data
+    dir yields [] rather than raising, so the page degrades to an empty picker
+    instead of 500-ing. `data_dir` is injectable for tests.
+    """
+    if not data_dir.is_dir():
+        return []
+    return sorted(p.stem for p in data_dir.glob("cv_*.txt"))

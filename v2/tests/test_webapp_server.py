@@ -62,7 +62,8 @@ def server(Session):
         finally:
             s.close()
 
-    httpd = make_server(host="127.0.0.1", port=0, jobs_provider=temp_provider)
+    httpd = make_server(host="127.0.0.1", port=0, jobs_provider=temp_provider,
+                        cvs_provider=lambda: ["cv_devops", "cv_frontend"])
     host, port = httpd.server_address
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -134,6 +135,28 @@ def test_index_served_at_root(server):
     assert status == 200
     assert "text/html" in ctype
     assert b"<" in body  # some HTML, whether the mockup or the placeholder
+
+
+def test_index_is_the_real_page_not_placeholder(server):
+    """Once static/index.html exists it must be served in place of the
+    placeholder — the page fetches /api/jobs, so that string must be present."""
+    _, _, body = _get(server, "/")
+    assert b"/api/jobs" in body
+    assert b"bucket" in body.lower()
+
+
+def test_favicon_is_204_not_404(server):
+    """The browser auto-requests /favicon.ico; answer 204 so it isn't a stray
+    404 in the access path of a daily-use tool."""
+    status, _, _ = _get(server, "/favicon.ico")
+    assert status == 204
+
+
+def test_api_cvs_returns_the_picker_list(server):
+    status, ctype, data = _get_json(server, "/api/cvs")
+    assert status == 200
+    assert "application/json" in ctype
+    assert data == {"cvs": ["cv_devops", "cv_frontend"]}
 
 
 def test_health(server):

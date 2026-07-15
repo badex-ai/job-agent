@@ -15,7 +15,7 @@ import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
-from v2.webapp.queries import get_classified_jobs, bucket_counts
+from v2.webapp.queries import get_classified_jobs, bucket_counts, list_cvs
 
 # The page lives next to this module. It may not exist yet (wired in build step
 # 3); the handler degrades to a plain placeholder rather than 500-ing so the
@@ -39,24 +39,33 @@ def _payload(jobs_provider):
     return {"buckets": buckets, "counts": bucket_counts(buckets)}
 
 
-def make_handler(jobs_provider=get_classified_jobs):
+def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs):
     """Build the request-handler class, closing over the classified-jobs reader.
 
     `jobs_provider` is injectable so tests can point the server at a temp DB
     without touching data/jobs.db. It must return the same shape as
-    `get_classified_jobs`: {bucket: [job_view, ...]}.
+    `get_classified_jobs`: {bucket: [job_view, ...]}. `cvs_provider` is the
+    same seam for the CV picker list (plan §4/§6).
     """
 
     class Handler(BaseHTTPRequestHandler):
         # Only GET is defined. POST/PUT/DELETE are intentionally absent so the
         # base class answers them 501 — the enforced read-only invariant.
         def do_GET(self):
-            if self.path == "/" or self.path.startswith("/index.html"):
+            path = self.path.split("?", 1)[0]
+            if path == "/" or path.startswith("/index.html"):
                 self._serve_index()
-            elif self.path == "/api/jobs":
+            elif path == "/api/jobs":
                 self._serve_json(_payload(jobs_provider))
-            elif self.path == "/api/health":
+            elif path == "/api/cvs":
+                self._serve_json({"cvs": cvs_provider()})
+            elif path == "/api/health":
                 self._serve_json({"status": "ok"})
+            elif path == "/favicon.ico":
+                # No icon asset; answer 204 so the browser's automatic request
+                # doesn't log a 404 on every page load.
+                self.send_response(204)
+                self.end_headers()
             else:
                 self._serve_error(404, "not found")
 
@@ -90,14 +99,16 @@ def make_handler(jobs_provider=get_classified_jobs):
     return Handler
 
 
-def make_server(host=HOST, port=PORT, jobs_provider=get_classified_jobs):
+def make_server(host=HOST, port=PORT, jobs_provider=get_classified_jobs,
+                cvs_provider=list_cvs):
     """Create (but do not start) the HTTP server bound to host:port.
 
     Threading so a slow browser fetch never blocks the next request; single
     user, so this is comfort, not concurrency the DB has to survive. Pass
     port=0 to let the OS pick a free port (tests do this).
     """
-    return ThreadingHTTPServer((host, port), make_handler(jobs_provider))
+    return ThreadingHTTPServer(
+        (host, port), make_handler(jobs_provider, cvs_provider))
 
 
 def serve(host=HOST, port=PORT):

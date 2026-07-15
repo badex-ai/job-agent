@@ -13,7 +13,7 @@ from sqlalchemy.orm import sessionmaker
 from shared.database.models import Base, Job, Decision, migrate_decisions
 from shared.database.decisions import record_decision
 from v2.webapp.queries import (
-    BUCKETS, get_classified_jobs, bucket_counts, _tags,
+    BUCKETS, get_classified_jobs, bucket_counts, list_cvs, _tags,
 )
 
 
@@ -183,6 +183,27 @@ def test_bucket_counts(Session):
     counts = bucket_counts(get_classified_jobs(session=s))
     assert counts == {"APPLY": 3, "CONSIDER": 0, "HOLD": 1, "SKIP": 0}
     s.close()
+
+
+# --- the CV picker list ----------------------------------------------------
+
+def test_list_cvs_globs_and_sorts(tmp_path):
+    (tmp_path / "cv_devops.txt").write_text("x")
+    (tmp_path / "cv_frontend.txt").write_text("x")
+    (tmp_path / "cv_fullstack.txt").write_text("x")
+    assert list_cvs(tmp_path) == ["cv_devops", "cv_frontend", "cv_fullstack"]
+
+
+def test_list_cvs_ignores_non_cv_and_non_txt(tmp_path):
+    (tmp_path / "cv_devops.txt").write_text("x")
+    (tmp_path / "cv.txt").write_text("x")          # no underscore -> not a picker CV
+    (tmp_path / "cv_notes.md").write_text("x")      # wrong extension
+    (tmp_path / "jobs.db").write_text("x")
+    assert list_cvs(tmp_path) == ["cv_devops"]
+
+
+def test_list_cvs_missing_dir_is_empty(tmp_path):
+    assert list_cvs(tmp_path / "nope") == []
 
 
 # --- pure helpers ----------------------------------------------------------

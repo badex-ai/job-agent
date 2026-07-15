@@ -1,0 +1,363 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Applications</title>
+<style>
+  :root {
+    --ground: #F7F6F3;
+    --card: #FFFFFF;
+    --ink: #2B2B2E;
+    --ink-soft: #6B6B70;
+    --ink-faint: #9A9A9F;
+    --line: #E7E5E0;
+    --line-strong: #D8D5CE;
+    --accent: #3E7C7B;
+    --accent-ink: #2E5E5D;
+    --priority: #C08A3E;
+    --skip: #B45B4E;
+    --consider: #4E7CB4;
+    --hold: #8A7BA8;
+    --shadow: 0 1px 2px rgba(40,40,45,.04), 0 6px 18px rgba(40,40,45,.05);
+    --radius: 10px;
+    --font: -apple-system, BlinkMacSystemFont, "Segoe UI", "Inter", system-ui, sans-serif;
+  }
+  @media (prefers-color-scheme: dark) {
+    :root {
+      --ground:#1A1B1E; --card:#212327; --ink:#E6E4DF; --ink-soft:#A2A19C;
+      --ink-faint:#75746F; --line:#303237; --line-strong:#3B3E44; --accent:#5FA3A1;
+      --accent-ink:#8FC3C1; --priority:#D6A45C; --skip:#D07A6D; --consider:#6E9BD6; --hold:#A896C4;
+      --shadow:0 1px 2px rgba(0,0,0,.2), 0 8px 24px rgba(0,0,0,.26);
+    }
+  }
+  :root[data-theme="light"]{--ground:#F7F6F3;--card:#FFFFFF;--ink:#2B2B2E;--ink-soft:#6B6B70;--ink-faint:#9A9A9F;--line:#E7E5E0;--line-strong:#D8D5CE;--accent:#3E7C7B;--accent-ink:#2E5E5D;--priority:#C08A3E;--skip:#B45B4E;--consider:#4E7CB4;--hold:#8A7BA8;--shadow:0 1px 2px rgba(40,40,45,.04),0 6px 18px rgba(40,40,45,.05);}
+  :root[data-theme="dark"]{--ground:#1A1B1E;--card:#212327;--ink:#E6E4DF;--ink-soft:#A2A19C;--ink-faint:#75746F;--line:#303237;--line-strong:#3B3E44;--accent:#5FA3A1;--accent-ink:#8FC3C1;--priority:#D6A45C;--skip:#D07A6D;--consider:#6E9BD6;--hold:#A896C4;--shadow:0 1px 2px rgba(0,0,0,.2),0 8px 24px rgba(0,0,0,.26);}
+
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--font);
+    font-size:14px; line-height:1.6; -webkit-font-smoothing:antialiased; }
+
+  /* header */
+  .top { display:flex; align-items:baseline; gap:16px; padding:22px 28px 0; max-width:1080px; margin:0 auto; }
+  .top h1 { font-size:19px; margin:0; letter-spacing:-.01em; font-weight:650; }
+  .top .sub { color:var(--ink-soft); font-size:13px; }
+  .cv { margin-left:auto; display:flex; align-items:center; gap:8px; font-size:13px; color:var(--ink-soft); }
+  .cv select { font:inherit; font-size:13px; color:var(--ink); background:var(--card);
+    border:1px solid var(--line-strong); border-radius:7px; padding:5px 9px; cursor:pointer; }
+  .cv select:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .themebtn { border:1px solid var(--line-strong); background:transparent; color:var(--ink-soft);
+    border-radius:7px; padding:5px 11px; font:inherit; font-size:12px; cursor:pointer; }
+  .themebtn:hover { color:var(--ink); }
+  .themebtn:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+
+  /* bucket tabs */
+  .tabs { display:flex; gap:4px; padding:16px 28px 0; max-width:1080px; margin:0 auto;
+    border-bottom:1px solid var(--line); overflow-x:auto; }
+  .tab { display:flex; align-items:center; gap:8px; padding:9px 15px; font:inherit; font-size:14px;
+    color:var(--ink-soft); cursor:pointer; border:0; border-bottom:2px solid transparent;
+    margin-bottom:-1px; font-weight:500; background:none; white-space:nowrap; }
+  .tab:hover { color:var(--ink); }
+  .tab.on { color:var(--ink); border-bottom-color:var(--accent); font-weight:600; }
+  .tab:focus-visible { outline:2px solid var(--accent); outline-offset:-2px; border-radius:4px; }
+  .tab .n { font-size:12px; font-variant-numeric:tabular-nums; color:var(--ink-faint);
+    background:var(--ground); border:1px solid var(--line); border-radius:20px; padding:0 8px; }
+  .tab.on .n { color:var(--accent-ink); border-color:color-mix(in srgb,var(--accent) 40%,var(--line)); }
+  .swatch { width:8px; height:8px; border-radius:50%; flex:none; }
+
+  /* list */
+  .list { max-width:1080px; margin:0 auto; padding:22px 28px 60px;
+    display:flex; flex-direction:column; gap:14px; }
+
+  .job { background:var(--card); border:1px solid var(--line); border-radius:var(--radius);
+    box-shadow:var(--shadow); padding:20px 22px; display:grid;
+    grid-template-columns:4px 1fr auto; gap:0 18px; align-items:start; }
+  .stripe { grid-row:1/3; width:4px; border-radius:3px; align-self:stretch; }
+
+  .head { display:flex; align-items:baseline; gap:10px; flex-wrap:wrap; }
+  .head h2 { font-size:16.5px; margin:0; letter-spacing:-.005em; font-weight:620; text-wrap:balance; }
+  .co { color:var(--ink-soft); font-size:14px; }
+  .co b { color:var(--ink); font-weight:600; }
+  .pri-flag { font-size:10.5px; font-weight:700; letter-spacing:.08em; text-transform:uppercase;
+    color:var(--priority); }
+
+  .line { color:var(--ink-soft); font-size:13.5px; margin:5px 0 0; }
+  .line .sep { color:var(--ink-faint); margin:0 8px; }
+
+  .reason { margin:11px 0 0; font-size:13.5px; color:var(--ink-soft); line-height:1.5;
+    padding-left:12px; border-left:2px solid color-mix(in srgb,var(--accent) 40%,var(--line)); max-width:64ch; }
+  .reason .k { font-weight:600; color:var(--accent-ink); font-size:11px; letter-spacing:.06em;
+    text-transform:uppercase; display:block; margin-bottom:3px; }
+  .tags { display:flex; gap:6px; margin-top:9px; flex-wrap:wrap; }
+  .tag { font-size:11px; color:var(--ink-soft); background:var(--ground); border:1px solid var(--line-strong);
+    border-radius:20px; padding:1px 9px; font-variant-numeric:tabular-nums; }
+
+  /* read-more toggle + inline-expanding description */
+  .readmore { display:inline-flex; align-items:center; gap:6px; margin-top:12px; font:inherit;
+    font-size:12.5px; font-weight:600; color:var(--accent-ink); background:none; border:none;
+    padding:0; cursor:pointer; }
+  .readmore:focus-visible { outline:2px solid var(--accent); outline-offset:2px; border-radius:3px; }
+  .readmore svg { width:13px; height:13px; transition:transform .18s ease; }
+  .desc { max-width:66ch; overflow:hidden; max-height:0; opacity:0;
+    transition:max-height .28s ease, opacity .2s ease, margin-top .28s ease; margin-top:0; }
+  .desc p { margin:0 0 11px; font-size:14px; color:var(--ink-soft); line-height:1.62; white-space:pre-wrap; }
+  .desc .lbl { font-size:10.5px; font-weight:700; letter-spacing:.1em; text-transform:uppercase;
+    color:var(--ink-faint); display:block; margin-bottom:9px; }
+  .job.open .desc { max-height:640px; opacity:1; margin-top:16px;
+    border-top:1px solid var(--line); padding-top:16px; overflow-y:auto; }
+  .job.open .readmore svg { transform:rotate(180deg); }
+  @media (prefers-reduced-motion: reduce){ .desc,.readmore svg{ transition:none; } }
+
+  /* right rail: the actions (copy msg, open link) */
+  .rail { grid-column:3; grid-row:1/3; display:flex; flex-direction:column; gap:8px; align-items:stretch; min-width:150px; }
+  .btn { display:flex; align-items:center; justify-content:center; gap:8px; font:inherit; font-size:13px;
+    font-weight:600; padding:9px 12px; border-radius:8px; cursor:pointer; border:1px solid var(--line-strong);
+    background:var(--card); color:var(--ink); transition:border-color .12s,background .12s; text-decoration:none; }
+  .btn:hover { border-color:var(--ink-faint); }
+  .btn:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .btn.primary { background:color-mix(in srgb,var(--accent) 12%,var(--card)); color:var(--accent-ink);
+    border-color:color-mix(in srgb,var(--accent) 45%,var(--line-strong)); }
+  .btn.primary:hover { background:color-mix(in srgb,var(--accent) 18%,var(--card)); }
+  .btn.copied { color:var(--accent); border-color:color-mix(in srgb,var(--accent) 55%,transparent); }
+  .btn svg { width:15px; height:15px; flex:none; }
+  .cvpick { font-size:11.5px; color:var(--ink-faint); text-align:center; margin-top:2px; }
+  .cvpick b { color:var(--ink-soft); font-weight:600; }
+
+  .empty, .failed { max-width:1080px; margin:0 auto; padding:64px 28px; text-align:center;
+    color:var(--ink-faint); font-size:14px; }
+  .failed { color:var(--skip); }
+
+  @media (max-width:720px){
+    .job { grid-template-columns:4px 1fr; }
+    .rail { grid-column:2; grid-row:auto; flex-direction:row; margin-top:14px; flex-wrap:wrap; }
+    .btn { flex:1 1 120px; }
+    .top { flex-wrap:wrap; }
+  }
+</style>
+</head>
+<body>
+
+<div class="top">
+  <h1>Applications</h1>
+  <span class="sub">what you've classified · read-only</span>
+  <div class="cv">
+    CV in use:
+    <select id="cv" aria-label="CV in use"></select>
+  </div>
+  <button class="themebtn" type="button" id="theme">theme</button>
+</div>
+
+<div class="tabs" id="tabs" role="tablist" aria-label="Buckets"></div>
+
+<div class="list" id="list" role="tabpanel">
+  <p class="empty">Loading…</p>
+</div>
+
+<script>
+"use strict";
+
+const BUCKETS = ["APPLY", "CONSIDER", "HOLD", "SKIP"];
+const LABEL = { APPLY: "Apply", CONSIDER: "Consider", HOLD: "Hold", SKIP: "Skip" };
+// Stripe/swatch hue per bucket. APPLY reuses the priority gold to match the
+// mockup (a priority Apply job and the Apply accent share the warm gold).
+const HUE = {
+  APPLY: "var(--priority)", CONSIDER: "var(--consider)",
+  HOLD: "var(--hold)", SKIP: "var(--skip)",
+};
+const EMPTY_COPY = {
+  APPLY: "Nothing marked Apply yet.",
+  CONSIDER: "Nothing to consider right now.",
+  HOLD: "Nothing on hold.",
+  SKIP: "No skipped jobs here.",
+};
+
+// Inline SVGs so the page stays self-contained (no icon CDN).
+const SVG_COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
+const SVG_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg>';
+const SVG_CHEV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>';
+
+let state = { buckets: {}, counts: {}, cvs: [], cv: null, active: "APPLY" };
+
+const $ = (sel, root = document) => root.querySelector(sel);
+function el(tag, attrs = {}, ...kids) {
+  const n = document.createElement(tag);
+  for (const [k, v] of Object.entries(attrs)) {
+    if (k === "class") n.className = v;
+    else if (k === "html") n.innerHTML = v;
+    else if (k === "text") n.textContent = v;
+    else if (v !== null && v !== undefined) n.setAttribute(k, v);
+  }
+  for (const kid of kids) if (kid !== null && kid !== undefined) n.append(kid);
+  return n;
+}
+
+async function load() {
+  try {
+    const [jobsRes, cvsRes] = await Promise.all([fetch("/api/jobs"), fetch("/api/cvs")]);
+    if (!jobsRes.ok) throw new Error("jobs " + jobsRes.status);
+    const jobs = await jobsRes.json();
+    state.buckets = jobs.buckets;
+    state.counts = jobs.counts;
+    state.cvs = cvsRes.ok ? (await cvsRes.json()).cvs : [];
+    state.cv = state.cvs[0] || null;
+    renderCvPicker();
+    renderTabs();
+    state.active = BUCKETS.find((b) => (state.counts[b] || 0) > 0) || "APPLY";
+    selectTab(state.active);
+  } catch {
+    $("#list").replaceChildren(
+      el("p", { class: "failed", text: "Couldn't reach the server. Is it still running?" }));
+  }
+}
+
+function renderCvPicker() {
+  const sel = $("#cv");
+  sel.replaceChildren();
+  if (state.cvs.length === 0) {
+    sel.append(el("option", { text: "none found" }));
+    sel.disabled = true;
+    return;
+  }
+  for (const cv of state.cvs) sel.append(el("option", { value: cv, text: cv + ".txt" }));
+  sel.value = state.cv;
+  sel.addEventListener("change", () => {
+    state.cv = sel.value;
+    renderList(state.active);  // refresh the per-card "CV in use" line
+  });
+}
+
+function renderTabs() {
+  const tabs = $("#tabs");
+  tabs.replaceChildren();
+  for (const b of BUCKETS) {
+    const tab = el("button",
+      { class: "tab", role: "tab", type: "button", id: "tab-" + b, "aria-selected": "false" },
+      el("span", { class: "swatch", style: "background:" + HUE[b] }),
+      document.createTextNode(LABEL[b] + " "),
+      el("span", { class: "n", text: String(state.counts[b] || 0) }));
+    tab.addEventListener("click", () => selectTab(b));
+    tabs.append(tab);
+  }
+}
+
+function selectTab(bucket) {
+  state.active = bucket;
+  for (const b of BUCKETS) {
+    const t = $("#tab-" + b);
+    t.classList.toggle("on", b === bucket);
+    t.setAttribute("aria-selected", String(b === bucket));
+  }
+  renderList(bucket);
+}
+
+function renderList(bucket) {
+  const list = $("#list");
+  const jobs = state.buckets[bucket] || [];
+  list.setAttribute("aria-labelledby", "tab-" + bucket);
+  if (jobs.length === 0) {
+    list.replaceChildren(el("p", { class: "empty", text: EMPTY_COPY[bucket] }));
+    return;
+  }
+  list.replaceChildren(...jobs.map((j) => jobCard(j, bucket)));
+}
+
+function jobCard(job, bucket) {
+  const stripe = el("div", { class: "stripe", style: "background:" + HUE[bucket] });
+
+  const head = el("div", { class: "head" },
+    el("h2", { text: job.title || "Untitled role" }),
+    el("span", { class: "co", html: "at <b></b>" }));
+  head.querySelector("b").textContent = job.company || "unknown company";
+  if (job.priority) head.append(el("span", { class: "pri-flag", text: "★ priority" }));
+
+  const line = el("p", { class: "line" });
+  if (job.location) line.append(document.createTextNode(job.location));
+
+  const body = el("div", {}, head, line);
+
+  const reason = el("div", { class: "reason" },
+    el("span", { class: "k", text: "Gate reason" }),
+    document.createTextNode(job.gate_reason || "(no reason recorded)"));
+  body.append(reason);
+
+  if (job.tags && job.tags.length) {
+    body.append(el("div", { class: "tags" },
+      ...job.tags.map((t) => el("span", { class: "tag", text: t }))));
+  }
+
+  const readmore = el("button", { class: "readmore", type: "button", "aria-expanded": "false" },
+    document.createTextNode("Read description "), el("span", { html: SVG_CHEV }));
+  const desc = el("div", { class: "desc" },
+    el("span", { class: "lbl", text: "Full posting" }),
+    el("p", { text: job.description || "(no description)" }));
+  body.append(readmore, desc);
+
+  const card = el("div", { class: "job" }, stripe, body);
+  readmore.addEventListener("click", () => {
+    const open = card.classList.toggle("open");
+    readmore.setAttribute("aria-expanded", String(open));
+  });
+
+  // right rail
+  const copyBtn = el("button", { class: "btn primary", type: "button", html: SVG_COPY });
+  copyBtn.append(document.createTextNode(" Copy message"));
+  copyBtn.addEventListener("click", () => copyMessage(job, copyBtn));
+
+  const rail = el("div", { class: "rail" }, copyBtn);
+  if (job.apply_link) {
+    const open = el("a",
+      { class: "btn", href: job.apply_link, target: "_blank", rel: "noopener noreferrer", html: SVG_OPEN });
+    open.append(document.createTextNode(" Open posting"));
+    rail.append(open);
+  }
+  // v1: the CV is the user's picked one, not an auto "best CV" (that's the
+  // deferred scoring feature) — so this line reflects the current picker.
+  const cvpick = el("div", { class: "cvpick", html: "CV in use: <b></b>" });
+  cvpick.querySelector("b").textContent = state.cv ? state.cv + ".txt" : "none";
+  rail.append(cvpick);
+  card.append(rail);
+
+  return card;
+}
+
+// v1 copy message: a plain fill-in template, NO LLM (plan §4). The tailored
+// "Draft with AI" message is a deferred, on-click, DB-cached future action.
+function buildMessage(job, cv) {
+  const role = job.title || "the role";
+  const company = job.company || "your team";
+  const cvLine = cv ? `\n\nI've attached my ${cv.replace(/^cv_/, "")} CV.` : "";
+  return `Hi,\n\nI'd like to apply for ${role} at ${company}. ` +
+    `The role looks like a strong fit for my background and I'd welcome the ` +
+    `chance to talk it through.${cvLine}\n\nThanks,`;
+}
+
+async function copyMessage(job, btn) {
+  const text = buildMessage(job, state.cv);
+  try {
+    await navigator.clipboard.writeText(text);
+  } catch {
+    const ta = el("textarea", {}); ta.value = text;
+    ta.style.position = "fixed"; ta.style.opacity = "0";
+    document.body.append(ta); ta.select();
+    try { document.execCommand("copy"); } catch { /* give up silently */ }
+    ta.remove();
+  }
+  const kids = [...btn.childNodes];
+  btn.textContent = "Copied ✓";
+  btn.classList.add("copied");
+  setTimeout(() => { btn.replaceChildren(...kids); btn.classList.remove("copied"); }, 1600);
+}
+
+$("#theme").addEventListener("click", () => {
+  const r = document.documentElement;
+  const now = r.getAttribute("data-theme");
+  // First click commits to the opposite of what's effectively shown.
+  const dark = now ? now === "dark"
+    : matchMedia("(prefers-color-scheme: dark)").matches;
+  r.setAttribute("data-theme", dark ? "light" : "dark");
+});
+
+load();
+</script>
+</body>
+</html>
