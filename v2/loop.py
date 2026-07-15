@@ -60,17 +60,22 @@ SCRAPE_FIELDS = ("id", "title", "company", "location", "is_remote",
 # the caller because Ollama has no thermal/rate-limit knob of its own (verified
 # against ollama source, 2026-07-11) — it MUST be client-side.
 #
-# Adaptive arm: with SSH to the Mac closed, per-job latency is our only thermal
-# telemetry. Metal thermal throttling shows up as latency creep, so if a job
-# runs slower than THROTTLE_RATIO × the batch's opening baseline, we lengthen
-# the cooldown — a closed loop using data the gate already returns.
+# The cooldown is a FIXED interval, deliberately not adaptive. An earlier arm
+# treated per-job latency as thermal telemetry ("Metal throttling shows up as
+# latency creep") and lengthened the cooldown on creep past 1.5x a running-minimum
+# baseline. Direct measurement (macmon on the Mac, 2026-07-15 — see v2/THERMAL.md)
+# retired that premise: the M4 holds ~8s/job flat at 100C, so latency does not
+# track heat here. The baseline was also a running MINIMUM, which only ratchets
+# down — the trip threshold drifted below the median job and fired on ordinary
+# content variance (description length, reasoning verbosity), so the backoff
+# doubled faster than it halved and pinned at the cap on a GPU sitting at 77C.
+# Spacing is the real lever; pick it by measurement, not by a proxy.
 GATE_COOLDOWN_S = 60.0      # sleep after each LIVE gate call (0 disables pacing)
-THROTTLE_RATIO = 1.5        # latency this-×-baseline => assume throttling
-# Cap the adaptive backoff strictly BELOW keep_alive ("5m"=300s in qwen_gate.py):
-# if the inter-job gap reached the unload timer, the model would race its own
-# expiry and each lost race adds a ~5.3s cold reload — which inflates latency,
-# which keeps the throttle detector pinned at max: a self-sustaining reload
-# thrash exactly when the system thinks it is being gentlest. 240s leaves margin.
+# Keep the cooldown strictly BELOW keep_alive ("5m"=300s in qwen_gate.py): if the
+# inter-job gap reached the unload timer, each lost race against expiry adds a
+# ~5.3s cold reload. 240s leaves margin. NOTE this bound holds for the sleep only
+# — a job that burns its full retry budget (3 x 120s timeout + 2 x 3s backoff in
+# eval_gate._gate_with_retry) already exceeds keep_alive and will reload.
 COOLDOWN_MAX_S = 240.0
 
 
@@ -191,8 +196,6 @@ def gate_pending(session, *, offline: bool, model: str = GATE_MODEL,
 
     # Pace only when we are actually driving the M4 (live + a real cooldown).
     pacing = not offline and cooldown_s > 0
-    baseline_latency = None       # first live-call latency = the un-throttled ref
-    cur_cooldown = cooldown_s
 
     summary = {"gated": 0, "surfaced": 0, "skipped": 0, "by_source": {},
                "m4_down": False}
@@ -228,24 +231,9 @@ def gate_pending(session, *, offline: bool, model: str = GATE_MODEL,
         # and only the output parse failed — thermally identical to 'qwen'. A
         # schema-drift streak overnight must not run back-to-back unpaced.
         if pacing and src != "hard_gate":
-            # Adaptive: latency creep past THROTTLE_RATIO×baseline means the M4
-            # is getting hot enough to throttle, so back off harder; a job that
-            # returns to baseline relaxes it back toward the floor. Baseline is a
-            # running MINIMUM so a cold-load-inflated job-0 (or a hot pass-2
-            # anchor) self-corrects downward within a few jobs — an anchor that
-            # is too high only ever *under*-paces, and min() heals it. An 'error'
-            # latency can be pathological, so it never sets the baseline.
-            if src != "error":
-                baseline_latency = (elapsed if baseline_latency is None
-                                    else min(baseline_latency, elapsed))
-            if baseline_latency is not None and elapsed > THROTTLE_RATIO * baseline_latency:
-                cur_cooldown = min(cur_cooldown * 2, COOLDOWN_MAX_S)
-                logger.info(f"[PACE] latency {elapsed:.1f}s > "
-                            f"{THROTTLE_RATIO}×{baseline_latency:.1f}s baseline — "
-                            f"cooldown -> {cur_cooldown:.0f}s")
-            else:
-                cur_cooldown = max(cur_cooldown / 2, cooldown_s)
-            time.sleep(cur_cooldown)
+            logger.info(f"[PACE] job latency {elapsed:.1f}s — sleeping "
+                        f"{cooldown_s:.0f}s")
+            time.sleep(cooldown_s)
     return summary
 
 

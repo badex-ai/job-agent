@@ -44,10 +44,19 @@ DEFAULT_OUT = REPO_ROOT / "data" / "eval_results.json"
 
 VALID_LABELS = {"APPLY", "CONSIDER", "HOLD", "SKIP"}
 
-# Thermal pacing for a live held-out run (mirrors v2/loop.py): keep the M4's
-# GPU below saturation by sleeping between calls. 240s caps the adaptive backoff
-# strictly under the 5m keep_alive so the model never unloads mid-batch.
-EVAL_THROTTLE_RATIO = 1.5
+# Thermal pacing for a live held-out run (mirrors v2/loop.py): keep the M4's GPU
+# below saturation by sleeping a FIXED interval between calls. Spacing is the
+# only lever — see v2/THERMAL.md; there is no OS/Ollama GPU thermal knob.
+#
+# The cooldown is deliberately NOT adaptive. It was, keyed on latency creep past
+# 1.5x a running-minimum baseline as a throttling proxy, and that was wrong twice
+# over: (a) macmon measured the M4 holding ~8s/job flat at 100C, so latency does
+# not signal throttling on this hardware in either direction; (b) a running
+# MINIMUM only ratchets down, so the trip threshold fell below the median job and
+# fired on ordinary content variance (description length, reasoning verbosity),
+# doubling the cooldown more often than the halving arm recovered it. A 2026-07-15
+# thermal capture caught it pinned at the 240s cap for 11 consecutive jobs, ~3.5x
+# the intended wall clock, while the GPU sat at a cool 77C.
 EVAL_COOLDOWN_MAX_S = 240.0
 
 
@@ -278,7 +287,7 @@ class TunnelDown(Exception):
 def evaluate(jobs: list[dict], system_prompt: str, transport=None,
              on_progress=None, abort_after_consecutive_errors=None,
              model=None, options=None, cooldown_s=0.0,
-             eligibility_only=False) -> dict:
+             eligibility_only=False, on_pace=None) -> dict:
     """Run the gate over jobs; return a metrics dict (every count has its n).
 
     Per-job failures (malformed output OR transport errors that survive
@@ -301,9 +310,15 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None,
     sustained load on that machine). This is a THERMAL knob only — it changes
     when calls happen, never the verdict — so a paced run and an unpaced run
     score identically. Mirrors v2/loop.py's pacing; kept scoring-neutral by
-    sleeping at the end of the loop body, outside verdict computation. An
-    adaptive arm lengthens the cooldown when latency creeps past 1.5x a running
-    minimum (a throttling proxy), capped under the 5m keep_alive."""
+    sleeping at the end of the loop body, outside verdict computation. The
+    interval is FIXED — see the EVAL_COOLDOWN_MAX_S comment for why the old
+    adaptive arm was removed.
+
+    `on_pace(info)` (default None = silent): called before each cooldown sleep
+    with the job's latency and the interval about to be slept. Pacing that
+    adapted silently is what let a 3.5x wall-clock regression hide behind a
+    hardware thermal probe; the interval is fixed now, but the run still says
+    what it is doing."""
     kw = {"transport": transport} if transport is not None else {}
     if model is not None:
         kw["model"] = model
@@ -315,8 +330,6 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None,
     total = len(jobs)
     consecutive_errors = 0
     pacing = cooldown_s > 0 and transport is None  # only when driving the live M4
-    baseline_latency = None
-    cur_cooldown = cooldown_s
 
     def _tick(done, title, info):
         if on_progress is not None:
@@ -324,27 +337,13 @@ def evaluate(jobs: list[dict], system_prompt: str, transport=None,
 
     def _pace(dt, *, hit_model):
         # Sleep after a call that reached the M4, to shed GPU heat. A GateError
-        # (malformed output) still ran the full inference, so it paces too; a
-        # pathological latency never sets the baseline. Baseline is a running
-        # minimum, so a cold-load-inflated first job self-corrects downward.
-        nonlocal baseline_latency, cur_cooldown
+        # (malformed output) still ran the full inference, so it paces too —
+        # thermally it is identical to a good verdict.
         if not (pacing and hit_model):
             return
-        # dt is None on a GateError: the inference ran (so we still pace, to shed
-        # heat) but the latency is unusable — HOLD the current cooldown, do not
-        # anchor the baseline on it and do not relax. Relaxing here would cool the
-        # machine LESS after a malformed response, the wrong direction on a hot,
-        # backed-off run.
-        if dt is None:
-            time.sleep(cur_cooldown)
-            return
-        if baseline_latency is None or dt < baseline_latency:
-            baseline_latency = dt
-        if dt > EVAL_THROTTLE_RATIO * baseline_latency:
-            cur_cooldown = min(cur_cooldown * 2, EVAL_COOLDOWN_MAX_S)
-        else:
-            cur_cooldown = max(cur_cooldown / 2, cooldown_s)
-        time.sleep(cur_cooldown)
+        if on_pace is not None:
+            on_pace({"latency_s": dt, "cooldown_s": cooldown_s})
+        time.sleep(cooldown_s)
 
     for i, j in enumerate(jobs, 1):
         t0 = time.time()

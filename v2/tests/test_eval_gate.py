@@ -709,3 +709,74 @@ def test_load_labeled_jobs_refuses_unknown_label(tmp_path):
     p.write_text(json.dumps([{"id": "1", "label": "MAYBE"}]))
     with pytest.raises(SystemExit):
         eval_gate.load_labeled_jobs(p)
+
+
+# --- pacing ----------------------------------------------------------------
+# Pacing only engages on the live path (transport is None), so these patch
+# gate_job directly rather than injecting a transport. The interval must be
+# FIXED: an earlier adaptive arm keyed on latency-vs-running-minimum ratcheted
+# to the cap on ordinary latency variance and cost 3.5x wall clock.
+
+def _paced_run(monkeypatch, latencies, cooldown_s=60.0):
+    """Run evaluate() on the live path with faked latencies; never sleeps.
+    Returns the list of intervals actually passed to time.sleep()."""
+    slept = []
+    monkeypatch.setattr(eval_gate.time, "sleep", lambda s: slept.append(s))
+
+    seq = iter(latencies)
+    clock = [0.0]
+
+    def fake_time():
+        return clock[0]
+
+    def fake_gate_job(**kw):
+        clock[0] += next(seq)  # advance the clock => that job's measured dt
+        return {"verdict": "surface", "reason": "r", "tags": [],
+                "confidence": 90, "raw": {}}
+
+    monkeypatch.setattr(eval_gate.time, "time", fake_time)
+    monkeypatch.setattr(eval_gate, "gate_job", fake_gate_job)
+    jobs = make_jobs([(f"J{i}", "APPLY") for i in range(len(latencies))])
+    eval_gate.evaluate(jobs, "sys", cooldown_s=cooldown_s)
+    return slept
+
+
+def test_pacing_interval_is_fixed_regardless_of_latency_swings(monkeypatch):
+    # The exact shape that pinned the old adaptive arm at the cap: one fast job
+    # anchors a running-minimum baseline, then normal (slower) jobs trip
+    # dt > 1.5*baseline forever. Interval must not move.
+    slept = _paced_run(monkeypatch, [4.0, 8.0, 9.0, 12.0, 8.0, 30.0])
+    assert slept == [60.0] * 6
+
+
+def test_pacing_does_not_ratchet_on_a_long_run(monkeypatch):
+    # 40 jobs of realistic jitter: the old arm reached 240s here.
+    lat = [6.0, 9.0, 7.5, 11.0, 8.0] * 8
+    slept = _paced_run(monkeypatch, lat)
+    assert set(slept) == {60.0}
+    assert max(slept) < eval_gate.EVAL_COOLDOWN_MAX_S
+
+
+def test_pacing_honours_the_requested_interval(monkeypatch):
+    # 70 jobs/hr => ~43s. The knob must be obeyed literally.
+    slept = _paced_run(monkeypatch, [8.0, 8.0, 8.0], cooldown_s=43.0)
+    assert slept == [43.0, 43.0, 43.0]
+
+
+def test_pacing_off_by_default(monkeypatch):
+    assert _paced_run(monkeypatch, [8.0, 8.0], cooldown_s=0.0) == []
+
+
+def test_on_pace_reports_every_sleep(monkeypatch):
+    # The adaptation was silent, which is why a 3.5x regression needed a
+    # hardware thermal probe to find. Pacing must be observable in-band.
+    seen = []
+    monkeypatch.setattr(eval_gate.time, "sleep", lambda s: None)
+    monkeypatch.setattr(eval_gate, "gate_job", lambda **kw: {
+        "verdict": "surface", "reason": "r", "tags": [], "confidence": 90,
+        "raw": {}})
+    jobs = make_jobs([("A", "APPLY"), ("B", "APPLY")])
+    eval_gate.evaluate(jobs, "sys", cooldown_s=30.0, on_pace=seen.append)
+    assert len(seen) == 2
+    assert all(e["cooldown_s"] == 30.0 for e in seen)
+    assert all("latency_s" in e for e in seen)
