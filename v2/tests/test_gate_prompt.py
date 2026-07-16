@@ -200,3 +200,16 @@ def test_raises_on_missing_rubric_structure(tmp_path):
 def test_default_paths_exist():
     assert DEFAULT_PROFILE_PATH.exists()
     assert DEFAULT_RUBRIC_PATH.exists()
+
+
+def test_firing_rule_forces_skip_verdict(prompt):
+    # The measured FN class: model names a firing disqualifying rule, then
+    # surfaces anyway. The prompt must hard-link a fired rule to a skip verdict.
+    assert "Verdict MUST match your reasoning" in prompt
+    assert "the\n`verdict` MUST be `skip`" in prompt
+    # The rule must anchor to the 'Disqualifying rule:' line, not a bare mention,
+    # and must only bind once the reasoning format that defines it is stated.
+    assert "'Disqualifying rule:' line binds the verdict" in prompt
+    assert prompt.index("Required reasoning format") < prompt.index(
+        "Verdict MUST match your reasoning"
+    )

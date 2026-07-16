@@ -166,7 +166,17 @@ def _procedure_block() -> str:
         "     substring proves the rule, the rule does not fire -> surface.\n"
         "Then set `verdict`. This replaces open-ended deliberation: cite the rule\n"
         "that matches your real reason, with a real quote from THIS posting, or\n"
-        "surface."
+        "surface.\n"
+        "\n"
+        "## Verdict MUST match your reasoning (do not contradict yourself)\n"
+        "If part 2 of your `reasoning` (the 'Disqualifying rule:' line) names a\n"
+        "rule (S1-S6) instead of 'none', AND part 3 gives a real quote, the\n"
+        "`verdict` MUST be `skip`. Writing 'Disqualifying rule: S1' and then\n"
+        "surfacing is a self-contradiction. A rule you mention as PASSING in\n"
+        "Phase 1 does NOT count — only the single rule named in the\n"
+        "'Disqualifying rule:' line binds the verdict. Two consistent outcomes\n"
+        "exist: that line names a rule with real evidence -> `skip`; that line is\n"
+        "'none' -> `surface`/`surface_priority`."
     )
 
 
