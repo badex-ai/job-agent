@@ -37,6 +37,7 @@ from pathlib import Path
 sys.path.insert(0, str(Path(__file__).resolve().parent.parent))
 
 from shared.database.models import Job, get_session, migrate_gate_columns
+from v2 import dedup
 from v2.gate_stage import GATE_MODEL, gate_one, offline_transport
 
 logging.basicConfig(
@@ -73,18 +74,65 @@ THROTTLE_RATIO = 1.5        # latency this-×-baseline => assume throttling
 COOLDOWN_MAX_S = 240.0
 
 
+def _merge_into(existing: Job, incoming: dict) -> None:
+    """Fold a duplicate incoming posting into the row we keep.
+
+    Keeps the existing id (labels/verdicts/decisions attach by id) and NEVER
+    touches status or any gate_* column (the gate-status invariant the rescue
+    view depends on). Refreshes only volatile fields: fill a blank description
+    from the incoming side; refresh apply_link/job_url when the merge was made
+    with both descriptions present (high confidence) or the existing row was
+    blank; always take the freshest date_posted.
+    """
+    inc_desc = incoming.get("description") or ""
+    existing_blank = dedup.is_blank(existing.description)
+    if existing_blank and not dedup.is_blank(inc_desc):
+        existing.description = inc_desc
+    both_present = not existing_blank and not dedup.is_blank(inc_desc)
+    if existing_blank or both_present:
+        if incoming.get("apply_link"):
+            existing.apply_link = incoming["apply_link"]
+        if incoming.get("job_url"):
+            existing.job_url = incoming["job_url"]
+    if incoming.get("date_posted"):
+        existing.date_posted = incoming["date_posted"]
+
+
 def _store_new_jobs(session, raw_jobs: list[dict]) -> int:
-    """Insert jobs whose id is not already a row. Returns count stored.
-    New rows have gate_verdict = NULL (the 'not yet gated' sentinel)."""
-    existing = {jid for (jid,) in session.query(Job.id).all()}
+    """Insert genuinely-new jobs; merge duplicates into the row we already keep.
+
+    Dedup is two-layer: exact id (a re-seen posting) and content
+    (v2/dedup.content_key + description guard — the same role re-posted under a
+    fresh id, or arriving from another source). A merged duplicate is folded into
+    the existing row instead of adding a second one the gate would re-score.
+    Returns the count of genuinely-new rows stored. New rows have
+    gate_verdict = NULL (the 'not yet gated' sentinel)."""
+    rows = session.query(Job).all()
+    by_id = {r.id: r for r in rows}
+    by_key: dict[tuple[str, str], list[Job]] = {}
+    for r in rows:
+        by_key.setdefault(dedup.content_key(
+            {"title": r.title, "company": r.company}), []).append(r)
+
     stored = 0
     for j in raw_jobs:
         jid = j.get("id")
-        if not jid or jid in existing:
+        if not jid:
             continue
-        session.add(Job(**{k: j.get(k) for k in SCRAPE_FIELDS if k in j},
-                         status="new"))
-        existing.add(jid)
+        if jid in by_id:                       # exact re-post of a known id
+            _merge_into(by_id[jid], j)
+            continue
+        key = dedup.content_key(j)
+        match = next((r for r in by_key.get(key, [])
+                      if dedup.is_duplicate(r.description, j.get("description") or "")),
+                     None)
+        if match is not None:                  # same role, different id
+            _merge_into(match, j)
+            continue
+        row = Job(**{k: j.get(k) for k in SCRAPE_FIELDS if k in j}, status="new")
+        session.add(row)
+        by_id[jid] = row
+        by_key.setdefault(key, []).append(row)
         stored += 1
     session.commit()
     return stored
