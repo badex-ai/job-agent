@@ -1,8 +1,9 @@
 """Tests for the webapp bucket-grouping read (v2/webapp/queries.py).
 
-Pins the one genuinely new query: group classified jobs by the LATEST
-Decision.human_label per job, into the four buckets, read-only. Runs against an
-isolated temp DB; data/jobs.db is untouched.
+Pins the one genuinely new query: group gated jobs by Job.gate_verdict into the
+browse buckets (surface_priority->APPLY, surface->CONSIDER, skip->SKIP), with
+HOLD sourced from the Application table and applied/dismissed/held jobs filtered
+out. Read-only; runs against an isolated temp DB so data/jobs.db is untouched.
 """
 from datetime import datetime, timedelta
 
@@ -10,8 +11,8 @@ import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from shared.database.models import Base, Job, Decision, migrate_decisions
-from shared.database.decisions import record_decision
+from shared.database.models import Base, Job, migrate_applications
+from v2.webapp import applications
 from v2.webapp.queries import (
     BUCKETS, get_classified_jobs, bucket_counts, list_cvs, _tags,
 )
@@ -21,7 +22,7 @@ from v2.webapp.queries import (
 def Session(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'test_jobs.db'}", echo=False)
     Base.metadata.create_all(engine)
-    migrate_decisions(engine)
+    migrate_applications(engine)
     return sessionmaker(bind=engine)
 
 
@@ -38,6 +39,7 @@ def _seed_job(session, **overrides):
         gate_reason="infra fit",
         gate_tags='["S6"]',
         gate_model="qwen2.5:14b",
+        gate_run_at=datetime.utcnow(),
     )
     base.update(overrides)
     job = Job(**base)
@@ -46,69 +48,86 @@ def _seed_job(session, **overrides):
     return job
 
 
-# --- grouping into the four buckets ----------------------------------------
+# --- grouping by gate verdict ----------------------------------------------
 
-def test_groups_by_latest_human_label(Session):
+def test_groups_by_gate_verdict(Session):
     s = Session()
-    _seed_job(s, id="j-apply")
-    _seed_job(s, id="j-consider")
-    _seed_job(s, id="j-hold")
-    _seed_job(s, id="j-skip")
-    record_decision(s.get(Job, "j-apply"), "APPLY", session=s)
-    record_decision(s.get(Job, "j-consider"), "CONSIDER", session=s)
-    record_decision(s.get(Job, "j-hold"), "HOLD", session=s)
-    record_decision(s.get(Job, "j-skip"), "SKIP", session=s)
+    _seed_job(s, id="j-apply", gate_verdict="surface_priority")
+    _seed_job(s, id="j-consider", gate_verdict="surface")
+    _seed_job(s, id="j-skip", gate_verdict="skip")
 
     buckets = get_classified_jobs(session=s)
     assert set(buckets) == set(BUCKETS)
     assert [j["id"] for j in buckets["APPLY"]] == ["j-apply"]
     assert [j["id"] for j in buckets["CONSIDER"]] == ["j-consider"]
-    assert [j["id"] for j in buckets["HOLD"]] == ["j-hold"]
     assert [j["id"] for j in buckets["SKIP"]] == ["j-skip"]
+    assert buckets["HOLD"] == []  # HOLD is a manual action, not a gate verdict
     s.close()
 
 
-def test_redecided_job_latest_wins(Session):
-    """Append-only: re-deciding inserts a second row; the latest label wins and the
-    job appears in exactly one bucket (plan §3)."""
+def test_held_job_moves_to_hold_bucket(Session):
+    """A held job leaves its gate bucket and appears under HOLD with its note."""
     s = Session()
-    _seed_job(s, id="j1")
-    # First HOLD, then CONSIDER later. Force ordered timestamps so the tiebreak
-    # isn't the only thing under test.
-    d1 = Decision(job_id="j1", human_label="HOLD",
-                  decided_at=datetime.utcnow() - timedelta(hours=1))
-    d2 = Decision(job_id="j1", human_label="CONSIDER",
-                  decided_at=datetime.utcnow())
-    s.add_all([d1, d2])
-    s.commit()
+    _seed_job(s, id="j1", gate_verdict="surface")
+    applications.hold_job("j1", note="wait for salary band", session=s)
+
+    buckets = get_classified_jobs(session=s)
+    assert buckets["CONSIDER"] == []          # pulled from its gate bucket
+    assert [j["id"] for j in buckets["HOLD"]] == ["j1"]
+    assert buckets["HOLD"][0]["note"] == "wait for salary band"
+    s.close()
+
+
+def test_applied_and_dismissed_jobs_are_filtered_out(Session):
+    """Applied/dismissed jobs vanish from the browse buckets entirely."""
+    s = Session()
+    _seed_job(s, id="j-applied", gate_verdict="surface_priority")
+    _seed_job(s, id="j-dismissed", gate_verdict="surface")
+    _seed_job(s, id="j-live", gate_verdict="surface")
+    applications.apply_to_job("j-applied", session=s)
+    applications.dismiss_job("j-dismissed", session=s)
+
+    buckets = get_classified_jobs(session=s)
+    ids = [j["id"] for v in buckets.values() for j in v]
+    assert ids == ["j-live"]
+    s.close()
+
+
+def test_restored_job_returns_to_its_gate_bucket(Session):
+    """Dismiss then restore: the job is back in its gate bucket, out of HOLD."""
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface")
+    applications.hold_job("j1", session=s)
+    applications.restore_job("j1", session=s)
 
     buckets = get_classified_jobs(session=s)
     assert [j["id"] for j in buckets["CONSIDER"]] == ["j1"]
     assert buckets["HOLD"] == []
-    # appears in exactly one bucket
-    total = sum(len(v) for v in buckets.values())
-    assert total == 1
     s.close()
 
 
-def test_id_tiebreak_when_timestamps_collide(Session):
-    """When two decisions share decided_at, the higher id (latest insert) wins."""
+def test_ungated_jobs_do_not_appear(Session):
+    """A job the gate hasn't scored (gate_verdict NULL) is in no bucket."""
     s = Session()
-    _seed_job(s, id="j1")
-    ts = datetime.utcnow()
-    s.add(Decision(job_id="j1", human_label="SKIP", decided_at=ts))
-    s.commit()
-    s.add(Decision(job_id="j1", human_label="APPLY", decided_at=ts))
-    s.commit()
-
+    _seed_job(s, id="gated", gate_verdict="surface")
+    _seed_job(s, id="ungated", gate_verdict=None)
     buckets = get_classified_jobs(session=s)
-    assert [j["id"] for j in buckets["APPLY"]] == ["j1"]
-    assert buckets["SKIP"] == []
+    ids = [j["id"] for v in buckets.values() for j in v]
+    assert ids == ["gated"]
+    s.close()
+
+
+def test_unknown_verdict_is_skipped_not_crash(Session):
+    """A verdict outside the three-valued space is dropped, not crashed on."""
+    s = Session()
+    _seed_job(s, id="weird", gate_verdict="maybe")
+    buckets = get_classified_jobs(session=s)
+    assert buckets == {b: [] for b in BUCKETS}
     s.close()
 
 
 def test_empty_buckets_are_clean_not_error(Session):
-    """No decisions at all -> all four buckets present and empty (plan §3)."""
+    """No gated jobs at all -> all four buckets present and empty (plan §3)."""
     s = Session()
     buckets = get_classified_jobs(session=s)
     assert buckets == {b: [] for b in BUCKETS}
@@ -116,24 +135,14 @@ def test_empty_buckets_are_clean_not_error(Session):
     s.close()
 
 
-def test_undecided_jobs_do_not_appear(Session):
+def test_newest_scored_first_within_bucket(Session):
     s = Session()
-    _seed_job(s, id="decided")
-    _seed_job(s, id="undecided")
-    record_decision(s.get(Job, "decided"), "APPLY", session=s)
+    _seed_job(s, id="older", gate_verdict="surface",
+              gate_run_at=datetime.utcnow() - timedelta(hours=1))
+    _seed_job(s, id="newer", gate_verdict="surface",
+              gate_run_at=datetime.utcnow())
     buckets = get_classified_jobs(session=s)
-    ids = [j["id"] for v in buckets.values() for j in v]
-    assert ids == ["decided"]
-    s.close()
-
-
-def test_decision_for_deleted_job_is_skipped_not_crash(Session):
-    """A Decision whose Job row is gone must not crash the view (plan §3)."""
-    s = Session()
-    s.add(Decision(job_id="ghost", human_label="APPLY", decided_at=datetime.utcnow()))
-    s.commit()
-    buckets = get_classified_jobs(session=s)
-    assert buckets == {b: [] for b in BUCKETS}
+    assert [j["id"] for j in buckets["CONSIDER"]] == ["newer", "older"]
     s.close()
 
 
@@ -142,7 +151,6 @@ def test_decision_for_deleted_job_is_skipped_not_crash(Session):
 def test_job_view_fields_and_priority_flag(Session):
     s = Session()
     _seed_job(s, id="jp", gate_verdict="surface_priority")
-    record_decision(s.get(Job, "jp"), "APPLY", session=s)
     view = get_classified_jobs(session=s)["APPLY"][0]
     assert view["id"] == "jp"
     assert view["title"] == "Senior Platform Engineer"
@@ -156,8 +164,8 @@ def test_job_view_fields_and_priority_flag(Session):
 
 def test_apply_link_falls_back_to_job_url(Session):
     s = Session()
-    _seed_job(s, id="jl", apply_link=None, job_url="https://example.com/job/xyz")
-    record_decision(s.get(Job, "jl"), "CONSIDER", session=s)
+    _seed_job(s, id="jl", gate_verdict="surface",
+              apply_link=None, job_url="https://example.com/job/xyz")
     view = get_classified_jobs(session=s)["CONSIDER"][0]
     assert view["apply_link"] == "https://example.com/job/xyz"
     s.close()
@@ -165,9 +173,8 @@ def test_apply_link_falls_back_to_job_url(Session):
 
 def test_missing_gate_reason_degrades(Session):
     s = Session()
-    _seed_job(s, id="jr", gate_reason=None, gate_tags=None)
-    record_decision(s.get(Job, "jr"), "HOLD", session=s)
-    view = get_classified_jobs(session=s)["HOLD"][0]
+    _seed_job(s, id="jr", gate_verdict="skip", gate_reason=None, gate_tags=None)
+    view = get_classified_jobs(session=s)["SKIP"][0]
     assert view["gate_reason"] is None
     assert view["tags"] == []
     s.close()
@@ -176,10 +183,9 @@ def test_missing_gate_reason_degrades(Session):
 def test_bucket_counts(Session):
     s = Session()
     for i in range(3):
-        _seed_job(s, id=f"a{i}")
-        record_decision(s.get(Job, f"a{i}"), "APPLY", session=s)
-    _seed_job(s, id="h0")
-    record_decision(s.get(Job, "h0"), "HOLD", session=s)
+        _seed_job(s, id=f"a{i}", gate_verdict="surface_priority")
+    _seed_job(s, id="h0", gate_verdict="surface")
+    applications.hold_job("h0", session=s)
     counts = bucket_counts(get_classified_jobs(session=s))
     assert counts == {"APPLY": 3, "CONSIDER": 0, "HOLD": 1, "SKIP": 0}
     s.close()

@@ -13,13 +13,14 @@ import json
 import threading
 import urllib.error
 import urllib.request
+from datetime import datetime
 
 import pytest
 from sqlalchemy import create_engine
 from sqlalchemy.orm import sessionmaker
 
-from shared.database.models import Base, Job, migrate_decisions
-from shared.database.decisions import record_decision
+from shared.database.models import Base, Job, migrate_applications
+from v2.webapp import applications
 from v2.webapp.queries import get_classified_jobs
 from v2.webapp.server import make_server
 
@@ -28,20 +29,28 @@ from v2.webapp.server import make_server
 def Session(tmp_path):
     engine = create_engine(f"sqlite:///{tmp_path / 'test_jobs.db'}", echo=False)
     Base.metadata.create_all(engine)
-    migrate_decisions(engine)
+    migrate_applications(engine)
     return sessionmaker(bind=engine)
+
+
+# Browse buckets read the gate verdict, not a human label. HOLD is a manual
+# park action, so a "HOLD-bucket" seed sets a gate verdict AND holds the job.
+_VERDICT = {"APPLY": "surface_priority", "CONSIDER": "surface", "SKIP": "skip"}
 
 
 def _seed_decided(Session, job_id, label):
     s = Session()
+    verdict = _VERDICT.get(label, "surface")
     s.add(Job(
         id=job_id, title=f"Role {job_id}", company="Acme", location="Remote",
         description="Build the thing.", apply_link=f"https://ex.com/{job_id}",
-        status="new", gate_verdict="surface", gate_reason="fit",
+        status="new", gate_verdict=verdict, gate_reason="fit",
         gate_tags='["S6"]', gate_model="qwen2.5:14b",
+        gate_run_at=datetime.utcnow(),
     ))
     s.commit()
-    record_decision(s.get(Job, job_id), label, session=s)
+    if label == "HOLD":
+        applications.hold_job(job_id, session=s)
     s.close()
 
 
