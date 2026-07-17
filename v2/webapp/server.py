@@ -1,20 +1,37 @@
-"""The read-only local server for the apply UI.
+"""The local server for the apply UI: read endpoints + one write seam.
 
 Stdlib `http.server` only — no Flask, no dependency. It binds 127.0.0.1 and
-serves two things: the single `index.html` page and a small JSON read endpoint
-the page fetches. There are NO write routes: the handler implements `do_GET`
-alone, so POST/PUT/DELETE fall through to the base class's 501. That absence IS
-the read-only invariant (plan §6) — the server cannot record a Decision or move
-a Job.status because it has no code path that writes, and the test pins it.
+serves the single `index.html` page, a small JSON read endpoint the page
+fetches, and ONE write endpoint (`POST /api/action`) that records the Apply /
+Dismiss / Hold / Restore / status actions.
 
-All DB access goes through `queries.get_classified_jobs`, which opens and closes
-its own session. The server holds no session and constructs no query, so it
-inherits the read-only guarantee from the one query module.
+The write surface is deliberately a single method on a single path so it can be
+guarded in one place. GET remains read-only. The action handler NEVER queries or
+mutates directly — it parses, guards, and dispatches to `v2.webapp.applications`,
+which owns the append-only Application log and the (immutable) gate-verdict
+invariant. There is no code path here that writes Job.gate_* or records a
+Decision.
+
+Write guards (a browser can reach this port, so localhost is not "trusted"):
+  1. JSON-only — the body must be `application/json`. An HTML <form> cannot send
+     that content-type cross-origin without a CORS preflight, so this alone
+     defeats classic form-based CSRF against the write path.
+  2. Host-header check — the Host must be 127.0.0.1/localhost:<port>. This blocks
+     DNS-rebinding, where a hostile page resolves its own domain to 127.0.0.1 and
+     POSTs to this server; the browser sends the attacker's Host, which we reject.
+  3. Bounded body — Content-Length is required and capped (_MAX_BODY), so a
+     missing or oversized body is refused rather than read unbounded.
+
+Concurrency note: ThreadingHTTPServer can run two writes at once. This is a
+single-human tool (one person clicking buttons), so in practice writes are
+serial; SQLite's own file lock serialises anything that does overlap, worst case
+a transient "database is locked". No app-level lock is added for that reason.
 """
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
+from v2.webapp import applications
 from v2.webapp.queries import get_classified_jobs, bucket_counts, list_cvs
 
 # The page lives next to this module. It may not exist yet (wired in build step
@@ -25,6 +42,11 @@ INDEX_FILE = STATIC_DIR / "index.html"
 
 HOST = "127.0.0.1"
 PORT = 8765
+
+# Cap the write body: action payloads are a job id + a short note, never large.
+_MAX_BODY = 64 * 1024
+# Host values allowed on a write (host:port is stripped to host before compare).
+_LOCAL_HOSTS = {"127.0.0.1", "localhost", "[::1]"}
 
 _PLACEHOLDER = (
     "<!doctype html><meta charset='utf-8'><title>Apply UI</title>"
@@ -39,6 +61,65 @@ def _payload(jobs_provider):
     return {"buckets": buckets, "counts": bucket_counts(buckets)}
 
 
+class _ActionError(Exception):
+    """A write request the client got wrong. Carries the HTTP status to return
+    (400 for bad input, 409 for a conflicting state like double-apply)."""
+
+    def __init__(self, status: int, message: str):
+        super().__init__(message)
+        self.status = status
+        self.message = message
+
+
+def dispatch_action(body: dict) -> dict:
+    """Route one parsed write request to the applications write seam.
+
+    `body` is the decoded JSON object. Returns the new Application row as a dict.
+    Raises _ActionError(400) on a malformed request (unknown action, missing
+    job_id, bad status, or an illegal state transition surfaced as ValueError by
+    the applications layer) and _ActionError(409) when apply's mark_applied
+    rejects (e.g. the job is already applied). This function does no I/O beyond
+    delegating; applications.* owns the session and the commit.
+    """
+    action = body.get("action")
+    job_id = body.get("job_id")
+    note = body.get("note")
+    if not isinstance(job_id, str) or not job_id:
+        raise _ActionError(400, "missing or invalid job_id")
+    # note reaches the DB column directly; a non-string (dict/list) would raise
+    # a ProgrammingError inside the applications layer, not a ValueError, and
+    # escape as an unanswered 500. Validate it here as str|None.
+    if note is not None and not isinstance(note, str):
+        raise _ActionError(400, "note must be a string")
+
+    try:
+        if action == "apply":
+            row, err = applications.apply_to_job(job_id, note=note)
+            if err is not None:
+                # mark_applied refused (unknown job / already applied): a
+                # conflict with existing state, not a malformed request.
+                raise _ActionError(409, err)
+            return row
+        if action == "dismiss":
+            return applications.dismiss_job(job_id, note=note)
+        if action == "hold":
+            return applications.hold_job(job_id, note=note)
+        if action == "restore":
+            return applications.restore_job(job_id)
+        if action == "set_status":
+            status = body.get("status")
+            if not isinstance(status, str):
+                raise _ActionError(400, "set_status requires a status string")
+            return applications.set_status(job_id, status)
+    except ValueError as exc:
+        # Illegal transition (restore a non-held job, status on an unapplied
+        # job, unknown status value) — the client asked for something the state
+        # machine forbids.
+        raise _ActionError(400, str(exc)) from exc
+
+    raise _ActionError(400, f"unknown action {action!r}")
+
+
 def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs):
     """Build the request-handler class, closing over the classified-jobs reader.
 
@@ -49,9 +130,21 @@ def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs):
     """
 
     class Handler(BaseHTTPRequestHandler):
-        # Only GET is defined. POST/PUT/DELETE are intentionally absent so the
-        # base class answers them 501 — the enforced read-only invariant.
+        # Bound a stalled request: without this, a client that declares a large
+        # Content-Length but never sends the body would block a handler thread
+        # forever on rfile.read (BaseHTTPRequestHandler sets no default timeout).
+        timeout = 10
+
+        # GET is read-only; POST is the single guarded write seam (/api/action).
+        # PUT/DELETE stay undefined so the base class answers them 501.
         def do_GET(self):
+            # The Host check is a DNS-rebind defence and it must guard READS too:
+            # rebinding's payoff against a localhost service is reading /api/jobs
+            # (the whole job DB + hold notes) from a hostile origin. Reject any
+            # request whose Host is not localhost, GET or POST alike.
+            if not self._host_is_local():
+                self._serve_error(403, "bad host")
+                return
             path = self.path.split("?", 1)[0]
             if path == "/" or path.startswith("/index.html"):
                 self._serve_index()
@@ -68,6 +161,75 @@ def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs):
                 self.end_headers()
             else:
                 self._serve_error(404, "not found")
+
+        def do_POST(self):
+            if not self._host_is_local():
+                self._serve_error(403, "bad host")
+                return
+            path = self.path.split("?", 1)[0]
+            if path != "/api/action":
+                # No write path here; a POST elsewhere is a plain 404, not 501,
+                # now that the server does serve one write route.
+                self._serve_error(404, "not found")
+                return
+            body = self._read_write_body()
+            if body is None:
+                return  # _read_write_body already sent the error response
+            try:
+                row = dispatch_action(body)
+            except _ActionError as exc:
+                self._serve_error(exc.status, exc.message)
+                return
+            except Exception:
+                # Catch-all: any non-ValueError from the applications layer (a
+                # SQLite OperationalError 'database is locked', a schema error,
+                # etc.) must become an honest 500 the page can show, not an
+                # unanswered dropped connection. Deliberately generic message —
+                # no str(exc) — so internal detail never leaks to the client.
+                self._serve_error(500, "internal error")
+                return
+            self._serve_json({"ok": True, "row": row})
+
+        def _host_is_local(self):
+            """True if the Host header names localhost (host:port -> host). The
+            DNS-rebind guard shared by GET and POST; a missing Host fails it."""
+            host = self.headers.get("Host", "").rsplit(":", 1)[0]
+            return host in _LOCAL_HOSTS
+
+        def _read_write_body(self):
+            """Guard + parse a write body. Returns the decoded dict, or None
+            after having sent the appropriate error response.
+
+            The Host check ran in do_POST already. Guards here, in order:
+            Content-Type (JSON-only, anti CSRF), bounded Content-Length, valid
+            JSON object.
+            """
+            ctype = self.headers.get("Content-Type", "").split(";", 1)[0].strip()
+            if ctype != "application/json":
+                self._serve_error(415, "expected application/json")
+                return None
+            try:
+                length = int(self.headers.get("Content-Length", ""))
+            except ValueError:
+                # Absent or non-numeric Content-Length on a body we must size.
+                self._serve_error(400, "missing or invalid content-length")
+                return None
+            if length <= 0:
+                self._serve_error(400, "empty body")
+                return None
+            if length > _MAX_BODY:
+                self._serve_error(413, "body too large")
+                return None
+            raw = self.rfile.read(length)
+            try:
+                body = json.loads(raw)
+            except ValueError:
+                self._serve_error(400, "invalid json")
+                return None
+            if not isinstance(body, dict):
+                self._serve_error(400, "json body must be an object")
+                return None
+            return body
 
         def _serve_index(self):
             if INDEX_FILE.exists():

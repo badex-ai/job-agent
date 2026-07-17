@@ -26,7 +26,7 @@ closes. A web seam serialises dicts anyway.
 """
 from typing import Dict, List, Optional
 
-from shared.database.models import Application, get_session
+from shared.database.models import Application, Job, get_session
 from shared.database import tracking
 
 # The post-apply lifecycle the Applied table cycles through (UI clickable cell).
@@ -101,6 +101,13 @@ def apply_to_job(job_id: str, note: Optional[str] = None, session=None):
     own = session is None
     session = session or get_session()
     try:
+        # Double-apply guard. The CLI has its own pre-check (cli.py), but the web
+        # path never runs it, so without this a second Apply (double-click, stale
+        # tab) would append a duplicate 'applied' row AND — via mark_applied —
+        # re-zero applied_at / followup_count, silently restarting the follow-up
+        # schedule for a job applied days ago. Refuse instead.
+        if session.query(Job.applied).filter(Job.id == job_id).scalar():
+            return None, f"{job_id} is already applied"
         row = _append(session, job_id, "applied", "applied", note)
         ok, err = tracking.mark_applied(job_id, via="website", session=session)
         if not ok:
