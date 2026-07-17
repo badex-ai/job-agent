@@ -6,6 +6,16 @@ from sqlalchemy.orm import sessionmaker
 from shared.database import models
 from shared.database.models import Base, Job, Application
 from v2.webapp import applications as app
+from v2.webapp.queries import get_classified_jobs
+
+
+def _in_a_bucket(session, job_id):
+    """True if the job currently appears in one of the browse buckets. Replaces
+    the old actioned_job_ids() helper (deleted): the behaviour under test is
+    "does acting on a job remove it from the worklist", so assert it through the
+    real consumer, get_classified_jobs."""
+    buckets = get_classified_jobs(session=session)
+    return any(j["id"] == job_id for v in buckets.values() for j in v)
 
 
 @pytest.fixture
@@ -39,18 +49,22 @@ def db(tmp_path, monkeypatch):
 
 def test_dismiss_hides_job_from_buckets(session):
     app.dismiss_job("j1", session=session)
-    assert "j1" in app.actioned_job_ids(session)
+    assert not _in_a_bucket(session, "j1")
 
 
-def test_hold_hides_job_from_buckets(session):
+def test_hold_hides_job_from_gate_bucket(session):
+    """Hold pulls a job from its gate bucket into HOLD (still "in a bucket", but
+    the HOLD one, not its verdict bucket)."""
     app.hold_job("j1", session=session)
-    assert "j1" in app.actioned_job_ids(session)
+    buckets = get_classified_jobs(session=session)
+    assert [j["id"] for j in buckets["HOLD"]] == ["j1"]
+    assert buckets["APPLY"] == []                    # left its verdict bucket
 
 
 def test_restore_unhides_a_dismissed_job(session):
     app.dismiss_job("j1", session=session)
     app.restore_job("j1", session=session)          # latest event = restored
-    assert "j1" not in app.actioned_job_ids(session)  # back in its bucket
+    assert _in_a_bucket(session, "j1")              # back in its bucket
 
 
 def test_latest_row_wins(session):
@@ -82,7 +96,7 @@ def test_apply_is_atomic_no_orphan_log_on_failure(session):
     row, err = app.apply_to_job("ghost", session=session)
     assert row is None and err is not None
     assert session.query(Application).filter(Application.job_id == "ghost").count() == 0
-    assert "ghost" not in app.actioned_job_ids(session)
+    assert not _in_a_bucket(session, "ghost")
 
 
 def test_dismiss_never_mutates_job_status(session):
@@ -117,6 +131,36 @@ def test_restore_on_applied_job_raises(session):
     app.apply_to_job("j1", session=session)
     with pytest.raises(ValueError):
         app.restore_job("j1", session=session)
+
+
+def test_dismiss_on_applied_job_raises(session):
+    # A2: dismissing an applied job would strand the application (leaves the
+    # Applied tab while Job.applied stays True, unreachable via Restore).
+    app.apply_to_job("j1", session=session)
+    with pytest.raises(ValueError):
+        app.dismiss_job("j1", session=session)
+
+
+def test_hold_on_applied_job_raises(session):
+    app.apply_to_job("j1", session=session)
+    with pytest.raises(ValueError):
+        app.hold_job("j1", session=session)
+
+
+def test_dismiss_on_cli_applied_job_raises(session):
+    # A2, CLI seam: a job applied to via the CLI has Job.applied=True but NO
+    # Application row. Dismiss must still refuse it (the _single_write guard
+    # checks Job.applied, not just the log).
+    session.query(Job).filter(Job.id == "j1").update({"applied": True})
+    session.commit()
+    with pytest.raises(ValueError):
+        app.dismiss_job("j1", session=session)
+
+
+def test_dismiss_on_fresh_job_still_works(session):
+    # The guard must not over-fire: a never-touched job dismisses normally.
+    row = app.dismiss_job("j1", session=session)
+    assert row["event"] == "dismissed"
 
 
 def test_status_change_not_counted_as_new_application(session):

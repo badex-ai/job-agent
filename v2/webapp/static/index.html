@@ -64,6 +64,9 @@
     background:var(--ground); border:1px solid var(--line); border-radius:20px; padding:0 8px; }
   .tab.on .n { color:var(--accent-ink); border-color:color-mix(in srgb,var(--accent) 40%,var(--line)); }
   .swatch { width:8px; height:8px; border-radius:50%; flex:none; }
+  /* the browse | tracking seam: a thin rule between the four gate buckets and
+     the two lifecycle tabs, so "jobs to triage" reads apart from "what I did". */
+  .tabgap { align-self:stretch; width:1px; background:var(--line-strong); margin:6px 10px 0; flex:none; }
 
   /* list */
   .list { max-width:1080px; margin:0 auto; padding:22px 28px 60px;
@@ -122,10 +125,57 @@
   .btn svg { width:15px; height:15px; flex:none; }
   .cvpick { font-size:11.5px; color:var(--ink-faint); text-align:center; margin-top:2px; }
   .cvpick b { color:var(--ink-soft); font-weight:600; }
+  /* the lifecycle action row (Apply / Dismiss / Hold) under the primary rail */
+  .acts { display:flex; gap:6px; margin-top:4px; padding-top:8px; border-top:1px solid var(--line); }
+  .acts .btn { flex:1; padding:7px 8px; font-size:12px; }
+  .acts .btn:disabled { opacity:.5; cursor:default; }
 
   .empty, .failed { max-width:1080px; margin:0 auto; padding:64px 28px; text-align:center;
     color:var(--ink-faint); font-size:14px; }
   .failed { color:var(--skip); }
+
+  /* tracking tables (Applied / Dismissed) */
+  .tbl-wrap { max-width:1080px; margin:0 auto; padding:22px 28px 60px; overflow-x:auto; }
+  table.trk { width:100%; border-collapse:collapse; background:var(--card);
+    border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow);
+    overflow:hidden; font-size:13.5px; }
+  table.trk th { text-align:left; font-size:11px; font-weight:700; letter-spacing:.07em;
+    text-transform:uppercase; color:var(--ink-faint); padding:12px 16px;
+    border-bottom:1px solid var(--line); white-space:nowrap; }
+  table.trk td { padding:13px 16px; border-bottom:1px solid var(--line); vertical-align:top; }
+  table.trk tr:last-child td { border-bottom:0; }
+  table.trk tr:hover td { background:color-mix(in srgb,var(--accent) 4%,var(--card)); }
+  .trk .jobcell b { font-weight:620; color:var(--ink); }
+  .trk .jobcell a { color:var(--ink); text-decoration:none; border-bottom:1px solid var(--line-strong); }
+  .trk .jobcell a:hover { color:var(--accent-ink); border-bottom-color:var(--accent); }
+  .trk .co { display:block; color:var(--ink-soft); font-size:12.5px; margin-top:2px; }
+  .trk .date { color:var(--ink-soft); font-variant-numeric:tabular-nums; white-space:nowrap; }
+  .trk .note { color:var(--ink-soft); max-width:34ch; }
+  .trk .note.empty-note { color:var(--ink-faint); font-style:italic; }
+  .note-text { cursor:text; border-bottom:1px dashed transparent; }
+  .trk tr:hover .note-text { border-bottom-color:var(--line-strong); }
+  .note-input { font:inherit; font-size:13.5px; width:100%; min-width:14ch; color:var(--ink);
+    background:var(--card); border:1px solid var(--accent); border-radius:6px; padding:4px 8px; }
+  .note-input:focus { outline:2px solid var(--accent); outline-offset:1px; }
+  /* the status cell: a dropdown of the lifecycle states (any state selectable,
+     so a mistaken change is one pick to fix) styled as a pill. */
+  .statuspill { font:inherit; font-size:12px; font-weight:600; cursor:pointer;
+    border:1px solid var(--line-strong); border-radius:20px; padding:3px 26px 3px 11px;
+    background:var(--ground); color:var(--ink); text-transform:capitalize;
+    transition:border-color .12s,background .12s; -webkit-appearance:none; appearance:none;
+    background-image:url("data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='%23999' stroke-width='2.5'%3E%3Cpath d='m6 9 6 6 6-6'/%3E%3C/svg%3E");
+    background-repeat:no-repeat; background-position:right 8px center; background-size:11px; }
+  .statuspill:hover:not(:disabled) { border-color:var(--accent); color:var(--accent-ink); }
+  .statuspill:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .statuspill:disabled { cursor:default; opacity:.6; }
+  .statuspill option { text-transform:capitalize; color:var(--ink); background:var(--card); }
+  .statuspill.s-offer { color:#2f7d4f; border-color:#2f7d4f66; }
+  .statuspill.s-rejected, .statuspill.s-ghosted { color:var(--skip); border-color:color-mix(in srgb,var(--skip) 45%,transparent); }
+  .restore { font:inherit; font-size:12.5px; font-weight:600; cursor:pointer;
+    border:1px solid var(--line-strong); border-radius:8px; padding:6px 12px;
+    background:var(--card); color:var(--ink); transition:border-color .12s; white-space:nowrap; }
+  .restore:hover { border-color:var(--accent); color:var(--accent-ink); }
+  .restore:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
 
   @media (max-width:720px){
     .job { grid-template-columns:4px 1fr; }
@@ -139,7 +189,7 @@
 
 <div class="top">
   <h1>Applications</h1>
-  <span class="sub">what you've classified · read-only</span>
+  <span class="sub">what you've classified</span>
   <div class="cv">
     CV in use:
     <select id="cv" aria-label="CV in use"></select>
@@ -156,27 +206,45 @@
 <script>
 "use strict";
 
+// The four gate buckets (cards) and the two lifecycle tables, rendered as one
+// tab strip with a divider between the two groups.
 const BUCKETS = ["APPLY", "CONSIDER", "HOLD", "SKIP"];
-const LABEL = { APPLY: "Apply", CONSIDER: "Consider", HOLD: "Hold", SKIP: "Skip" };
+const TRACK = ["APPLIED", "DISMISSED"];
+const TABS = [...BUCKETS, ...TRACK];
+const LABEL = {
+  APPLY: "Apply", CONSIDER: "Consider", HOLD: "Hold", SKIP: "Skip",
+  APPLIED: "Applied", DISMISSED: "Dismissed",
+};
 // Stripe/swatch hue per bucket. APPLY reuses the priority gold to match the
 // mockup (a priority Apply job and the Apply accent share the warm gold).
 const HUE = {
   APPLY: "var(--priority)", CONSIDER: "var(--consider)",
   HOLD: "var(--hold)", SKIP: "var(--skip)",
+  APPLIED: "var(--accent)", DISMISSED: "var(--ink-faint)",
 };
 const EMPTY_COPY = {
   APPLY: "Nothing marked Apply yet.",
   CONSIDER: "Nothing to consider right now.",
   HOLD: "Nothing on hold.",
   SKIP: "No skipped jobs here.",
+  APPLIED: "You haven't applied to anything yet.",
+  DISMISSED: "Nothing dismissed.",
 };
+// The post-apply lifecycle states, offered as a dropdown on the Applied row so
+// any state is one action away — forward OR backward. A funnel that only moves
+// forward can't undo a fat-finger (interview mis-set to offer), and this is a
+// personal tracker: correcting your own data must be trivial.
+const STATUSES = ["applied", "interview", "offer", "rejected", "ghosted"];
 
 // Inline SVGs so the page stays self-contained (no icon CDN).
 const SVG_COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
 const SVG_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg>';
 const SVG_CHEV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>';
 
-let state = { buckets: {}, counts: {}, cvs: [], cv: null, active: "APPLY" };
+let state = {
+  buckets: {}, counts: {}, cvs: [], cv: null, active: "APPLY",
+  applied: [], dismissed: [],
+};
 
 const $ = (sel, root = document) => root.querySelector(sel);
 function el(tag, attrs = {}, ...kids) {
@@ -191,23 +259,48 @@ function el(tag, attrs = {}, ...kids) {
   return n;
 }
 
+// Fetch the browse buckets + the tracking tables into state. Shared by the
+// first load and by refresh() after a write; does NOT touch the CV picker or
+// the active tab, so a mid-session refresh is seamless.
+async function fetchData() {
+  const [jobsRes, appsRes] = await Promise.all([
+    fetch("/api/jobs"), fetch("/api/applications"),
+  ]);
+  if (!jobsRes.ok) throw new Error("jobs " + jobsRes.status);
+  const jobs = await jobsRes.json();
+  state.buckets = jobs.buckets;
+  state.counts = jobs.counts;
+  // /api/applications is best-effort: if it fails the tracking tabs just show
+  // empty rather than breaking the whole page.
+  const apps = appsRes.ok ? await appsRes.json() : { applied: [], dismissed: [] };
+  state.applied = apps.applied || [];
+  state.dismissed = apps.dismissed || [];
+  state.counts.APPLIED = state.applied.length;
+  state.counts.DISMISSED = state.dismissed.length;
+}
+
 async function load() {
   try {
-    const [jobsRes, cvsRes] = await Promise.all([fetch("/api/jobs"), fetch("/api/cvs")]);
-    if (!jobsRes.ok) throw new Error("jobs " + jobsRes.status);
-    const jobs = await jobsRes.json();
-    state.buckets = jobs.buckets;
-    state.counts = jobs.counts;
+    const cvsRes = await fetch("/api/cvs");
+    await fetchData();
     state.cvs = cvsRes.ok ? (await cvsRes.json()).cvs : [];
     state.cv = state.cvs[0] || null;
     renderCvPicker();
     renderTabs();
-    state.active = BUCKETS.find((b) => (state.counts[b] || 0) > 0) || "APPLY";
+    state.active = TABS.find((b) => (state.counts[b] || 0) > 0) || "APPLY";
     selectTab(state.active);
   } catch {
     $("#list").replaceChildren(
       el("p", { class: "failed", text: "Couldn't reach the server. Is it still running?" }));
   }
+}
+
+// Re-pull data after a write and re-render the current tab + the counts, so an
+// acted-on job leaves its bucket and the tab numbers stay truthful.
+async function refresh() {
+  await fetchData();
+  renderTabs();
+  selectTab(state.active);
 }
 
 function renderCvPicker() {
@@ -229,7 +322,9 @@ function renderCvPicker() {
 function renderTabs() {
   const tabs = $("#tabs");
   tabs.replaceChildren();
-  for (const b of BUCKETS) {
+  for (const b of TABS) {
+    // divider between the browse buckets and the tracking tabs (Applied first).
+    if (b === TRACK[0]) tabs.append(el("span", { class: "tabgap", "aria-hidden": "true" }));
     const tab = el("button",
       { class: "tab", role: "tab", type: "button", id: "tab-" + b, "aria-selected": "false" },
       el("span", { class: "swatch", style: "background:" + HUE[b] }),
@@ -240,25 +335,168 @@ function renderTabs() {
   }
 }
 
-function selectTab(bucket) {
-  state.active = bucket;
-  for (const b of BUCKETS) {
+function selectTab(tab) {
+  state.active = tab;
+  for (const b of TABS) {
     const t = $("#tab-" + b);
-    t.classList.toggle("on", b === bucket);
-    t.setAttribute("aria-selected", String(b === bucket));
+    t.classList.toggle("on", b === tab);
+    t.setAttribute("aria-selected", String(b === tab));
   }
-  renderList(bucket);
+  renderList(tab);
 }
 
-function renderList(bucket) {
+function renderList(tab) {
   const list = $("#list");
-  const jobs = state.buckets[bucket] || [];
-  list.setAttribute("aria-labelledby", "tab-" + bucket);
+  list.setAttribute("aria-labelledby", "tab-" + tab);
+  if (tab === "APPLIED") return renderAppliedTable(list);
+  if (tab === "DISMISSED") return renderDismissedTable(list);
+
+  const jobs = state.buckets[tab] || [];
   if (jobs.length === 0) {
-    list.replaceChildren(el("p", { class: "empty", text: EMPTY_COPY[bucket] }));
+    list.replaceChildren(el("p", { class: "empty", text: EMPTY_COPY[tab] }));
     return;
   }
-  list.replaceChildren(...jobs.map((j) => jobCard(j, bucket)));
+  list.replaceChildren(...jobs.map((j) => jobCard(j, tab)));
+}
+
+// POST one action to the guarded write seam, then refresh so the change is
+// reflected everywhere. Returns true on success; on failure surfaces the
+// server's message and leaves the view untouched.
+async function postAction(payload) {
+  try {
+    const res = await fetch("/api/action", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify(payload),
+    });
+    if (!res.ok) {
+      let msg = "action failed (" + res.status + ")";
+      try { msg = (await res.json()).error || msg; } catch { /* keep default */ }
+      alert(msg);
+      return false;
+    }
+    await refresh();
+    return true;
+  } catch {
+    alert("Couldn't reach the server.");
+    return false;
+  }
+}
+
+function jobCell(row) {
+  // Title links to the posting when we have a link; company sits below it.
+  const inner = row.apply_link
+    ? el("a", { href: row.apply_link, target: "_blank", rel: "noopener noreferrer",
+        text: row.title || row.id })
+    : el("b", { text: row.title || row.id });
+  const cell = el("td", { class: "jobcell" }, inner);
+  if (row.company) cell.append(el("span", { class: "co", text: row.company }));
+  return cell;
+}
+
+// An editable note cell. Click the text to swap in an input; Enter or blur
+// saves (POST set_note + refresh), Esc cancels. An empty note shows a faint
+// "add note…" affordance. `jobId` is the job the note belongs to.
+function noteCell(note, jobId) {
+  const td = el("td", { class: "note" });
+
+  function showText() {
+    td.replaceChildren();
+    if (note) {
+      td.classList.remove("empty-note");
+      td.append(el("span", { class: "note-text", text: note, title: "Click to edit" }));
+    } else {
+      td.classList.add("empty-note");
+      td.append(el("span", { class: "note-text", text: "add note…", title: "Click to add a note" }));
+    }
+    td.querySelector(".note-text").addEventListener("click", showEdit);
+  }
+
+  function showEdit() {
+    const input = el("input", { class: "note-input", type: "text", value: note || "",
+      "aria-label": "Note" });
+    td.replaceChildren(input);
+    input.focus();
+    input.setSelectionRange(input.value.length, input.value.length);
+    let done = false;
+    const save = async () => {
+      if (done) return; done = true;
+      const next = input.value.trim();
+      if (next === (note || "")) { showText(); return; }  // unchanged: no write
+      const ok = await postAction({ action: "set_note", job_id: jobId, note: next || null });
+      if (!ok) showText();  // on success, refresh() re-renders the whole table
+    };
+    input.addEventListener("keydown", (e) => {
+      if (e.key === "Enter") { e.preventDefault(); save(); }
+      else if (e.key === "Escape") { done = true; showText(); }
+    });
+    input.addEventListener("blur", save);
+  }
+
+  showText();
+  return td;
+}
+
+function renderAppliedTable(list) {
+  if (state.applied.length === 0) {
+    list.replaceChildren(el("p", { class: "empty", text: EMPTY_COPY.APPLIED }));
+    return;
+  }
+  const rows = state.applied.map((r) => {
+    const tr = el("tr", {},
+      jobCell(r),
+      el("td", { class: "date", text: r.applied_at || "—" }));
+    tr.append(el("td", {}, statusPill(r)));
+    tr.append(noteCell(r.note, r.id));
+    return tr;
+  });
+  const table = el("table", { class: "trk" },
+    el("thead", {}, el("tr", {},
+      el("th", { text: "Job" }), el("th", { text: "Applied" }),
+      el("th", { text: "Status" }), el("th", { text: "Notes" }))),
+    el("tbody", {}, ...rows));
+  list.replaceChildren(el("div", { class: "tbl-wrap" }, table));
+}
+
+// The status cell: a dropdown of the five lifecycle states. Choosing any one
+// POSTs set_status and refreshes — so a mistaken change is corrected by simply
+// picking the right state again, with no locked/terminal states.
+function statusPill(row) {
+  const status = row.status || "applied";
+  const sel = el("select",
+    { class: "statuspill s-" + status, "aria-label": "Application status" });
+  for (const s of STATUSES) {
+    sel.append(el("option", { value: s, text: s, ...(s === status ? { selected: "" } : {}) }));
+  }
+  sel.addEventListener("change", async () => {
+    const next = sel.value;
+    if (next === status) return;
+    sel.disabled = true;
+    const ok = await postAction({ action: "set_status", job_id: row.id, status: next });
+    if (!ok) { sel.value = status; sel.disabled = false; }  // revert on failure
+  });
+  return sel;
+}
+
+function renderDismissedTable(list) {
+  if (state.dismissed.length === 0) {
+    list.replaceChildren(el("p", { class: "empty", text: EMPTY_COPY.DISMISSED }));
+    return;
+  }
+  const rows = state.dismissed.map((r) => {
+    const restore = el("button", { class: "restore", type: "button", text: "Restore" });
+    restore.addEventListener("click", async () => {
+      restore.disabled = true;
+      const ok = await postAction({ action: "restore", job_id: r.id });
+      if (!ok) restore.disabled = false;
+    });
+    return el("tr", {}, jobCell(r), noteCell(r.note, r.id), el("td", {}, restore));
+  });
+  const table = el("table", { class: "trk" },
+    el("thead", {}, el("tr", {},
+      el("th", { text: "Job" }), el("th", { text: "Notes" }), el("th", { text: "" }))),
+    el("tbody", {}, ...rows));
+  list.replaceChildren(el("div", { class: "tbl-wrap" }, table));
 }
 
 function jobCard(job, bucket) {
@@ -310,6 +548,42 @@ function jobCard(job, bucket) {
     open.append(document.createTextNode(" Open posting"));
     rail.append(open);
   }
+
+  // Lifecycle actions. Apply records the application (and, when there's a link,
+  // opens the posting in the same click so the two never drift). Which actions a
+  // card gets depends on its bucket:
+  //   APPLY / CONSIDER : Apply · Dismiss · Hold
+  //   SKIP             : Apply · Hold  — SKIP is the rescue view for gate
+  //     false-positives (a buried good job), which under the manual-apply
+  //     workflow is the EXPENSIVE error (the design notes). So a skipped job
+  //     MUST be actionable — you can apply to it or park it. Dismiss is omitted:
+  //     the gate already skipped it, so "dismiss" adds nothing.
+  //   HOLD             : Apply · Dismiss · Restore (send it back to its bucket)
+  const apply = el("button", { class: "btn", type: "button", text: "Apply" });
+  apply.addEventListener("click", async () => {
+    if (job.apply_link) window.open(job.apply_link, "_blank", "noopener");
+    apply.disabled = true;
+    const ok = await postAction({ action: "apply", job_id: job.id });
+    if (!ok) apply.disabled = false;
+  });
+  const acts = el("div", { class: "acts" }, apply);
+
+  if (bucket !== "SKIP") {
+    const dismiss = el("button", { class: "btn", type: "button", text: "Dismiss" });
+    dismiss.addEventListener("click", () => acton("dismiss", job, dismiss));
+    acts.append(dismiss);
+  }
+  if (bucket === "HOLD") {
+    const restore = el("button", { class: "btn", type: "button", text: "Restore" });
+    restore.addEventListener("click", () => acton("restore", job, restore));
+    acts.append(restore);
+  } else {
+    const hold = el("button", { class: "btn", type: "button", text: "Hold" });
+    hold.addEventListener("click", () => acton("hold", job, hold));
+    acts.append(hold);
+  }
+  rail.append(acts);
+
   // v1: the CV is the user's picked one, not an auto "best CV" (that's the
   // deferred scoring feature) — so this line reflects the current picker.
   const cvpick = el("div", { class: "cvpick", html: "CV in use: <b></b>" });
@@ -318,6 +592,13 @@ function jobCard(job, bucket) {
   card.append(rail);
 
   return card;
+}
+
+// Fire a non-apply card action (dismiss / hold / restore) and refresh.
+async function acton(action, job, btn) {
+  btn.disabled = true;
+  const ok = await postAction({ action, job_id: job.id });
+  if (!ok) btn.disabled = false;
 }
 
 // v1 copy message: a plain fill-in template, NO LLM (plan §4). The tailored

@@ -34,11 +34,19 @@ STATUSES = ("applied", "interview", "offer", "rejected", "ghosted")
 # The actions the UI can take on a job. 'status_changed' is distinct from
 # 'applied' so a lifecycle edit is never miscounted as a fresh application.
 EVENTS = ("applied", "status_changed", "dismissed", "held", "restored")
-# An action that removes a job from its gate bucket (the worklist shrinks). A
-# 'restored' event returns it, so it is deliberately NOT in this set.
-_ACTIVE_EVENTS = {"applied", "status_changed", "dismissed", "held"}
-# Events that place a job in the Applied tab (it has been applied to).
-_APPLIED_EVENTS = {"applied", "status_changed"}
+
+# --- event-meaning sets: the single source of truth for "what does a job's
+# latest event mean". queries.py and the /api/applications read import these
+# rather than re-listing the literals, so the taxonomy lives in exactly one
+# place (a stray literal in two modules is how the buckets and the tables drift
+# apart). Every non-'restored' event puts a job somewhere; 'restored' returns it
+# to its gate bucket, so it is deliberately in none of these sets.
+APPLIED_EVENTS = {"applied", "status_changed"}   # -> Applied tab
+DISMISSED_EVENTS = {"dismissed"}                 # -> Dismissed tab
+HELD_EVENTS = {"held"}                           # -> HOLD browse bucket
+# A job whose latest event is any of these is pulled out of the three gate
+# browse buckets (the worklist shrinks as it is worked).
+HIDDEN_FROM_BUCKETS = APPLIED_EVENTS | DISMISSED_EVENTS | HELD_EVENTS
 
 
 def _as_dict(row: Application) -> dict:
@@ -67,17 +75,15 @@ def latest_states(session=None) -> Dict[str, Application]:
             session.close()
 
 
-def actioned_job_ids(session=None) -> set:
-    """Job ids whose latest action removes them from the browse buckets."""
-    return {jid for jid, a in latest_states(session).items()
-            if a.event in _ACTIVE_EVENTS}
+def _latest_row(session, job_id: str) -> Optional[Application]:
+    return (session.query(Application)
+            .filter(Application.job_id == job_id)
+            .order_by(Application.id.desc())
+            .first())
 
 
 def _latest_event(session, job_id: str) -> Optional[str]:
-    row = (session.query(Application)
-           .filter(Application.job_id == job_id)
-           .order_by(Application.id.desc())
-           .first())
+    row = _latest_row(session, job_id)
     return row.event if row else None
 
 
@@ -138,7 +144,7 @@ def restore_job(job_id: str, session=None) -> dict:
     session = session or get_session()
     try:
         latest = _latest_event(session, job_id)
-        if latest not in ("dismissed", "held"):
+        if latest not in DISMISSED_EVENTS | HELD_EVENTS:
             raise ValueError(
                 f"cannot restore {job_id!r}: latest event is {latest!r}, "
                 "restore is only valid for a dismissed or held job")
@@ -162,7 +168,7 @@ def set_status(job_id: str, status: str, session=None) -> dict:
     own = session is None
     session = session or get_session()
     try:
-        if _latest_event(session, job_id) not in _APPLIED_EVENTS:
+        if _latest_event(session, job_id) not in APPLIED_EVENTS:
             raise ValueError(
                 f"cannot set status on {job_id!r}: it has not been applied to")
         row = _append(session, job_id, "status_changed", status, None)
@@ -173,12 +179,58 @@ def set_status(job_id: str, status: str, session=None) -> dict:
             session.close()
 
 
-def _single_write(job_id: str, event: str, status: Optional[str],
-                  note: Optional[str], session) -> dict:
-    """Shared body for the single-row writers (dismiss/hold): append + commit."""
+def set_note(job_id: str, note: Optional[str], session=None) -> dict:
+    """Edit the note on an applied/dismissed/held job — without moving it.
+
+    A note is not a placement change, but the tab a job sits in is decided by its
+    LATEST event, so we cannot append a bare 'note' event (it would orphan the
+    row out of applied/dismissed). Instead we RE-APPEND the job's current
+    placement event with the new note, carrying its current status forward. The
+    latest-event invariant is preserved and the note rides along. Empty/blank
+    text stores NULL (clears the note). Legal only on a job that is currently
+    placed (applied/status_changed/dismissed/held); a 'restored' or never-touched
+    job has no note to edit (raises).
+    """
+    clean = note.strip() if isinstance(note, str) and note.strip() else None
     own = session is None
     session = session or get_session()
     try:
+        latest = _latest_row(session, job_id)
+        event = latest.event if latest else None
+        if event not in HIDDEN_FROM_BUCKETS:
+            raise ValueError(
+                f"cannot set a note on {job_id!r}: its latest event is "
+                f"{event!r}, which is not a job you can annotate")
+        # carry the current status forward (only meaningful for applied rows).
+        row = _append(session, job_id, event, latest.status, clean)
+        session.commit()
+        return _as_dict(row)
+    finally:
+        if own:
+            session.close()
+
+
+def _single_write(job_id: str, event: str, status: Optional[str],
+                  note: Optional[str], session) -> dict:
+    """Shared body for the single-row writers (dismiss/hold): append + commit.
+
+    Refuses to act on an APPLIED job. Dismiss/hold have no state guard by
+    default, unlike restore/set_status/set_note; without this, dismissing an
+    applied job (e.g. from a stale tab still showing its card) would make
+    'dismissed' the latest event and strand the application — it leaves the
+    Applied table while Job.applied stays True, and Restore only sends it back to
+    a gate bucket where Apply 409s. An applied lifecycle ends with a set_status
+    (rejected/ghosted), never a dismiss. Both the Application log AND Job.applied
+    are checked, since a CLI-applied job has the flag but no log row.
+    """
+    own = session is None
+    session = session or get_session()
+    try:
+        if _latest_event(session, job_id) in APPLIED_EVENTS or \
+                session.query(Job.applied).filter(Job.id == job_id).scalar():
+            raise ValueError(
+                f"cannot {event} {job_id!r}: it has already been applied to; "
+                "change its status instead")
         row = _append(session, job_id, event, status, note)
         session.commit()
         return _as_dict(row)

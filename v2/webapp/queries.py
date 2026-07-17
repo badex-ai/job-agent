@@ -96,21 +96,33 @@ def get_classified_jobs(session=None) -> Dict[str, List[dict]]:
     try:
         states = applications.latest_states(session)
         # held jobs -> HOLD bucket (with their note); applied/dismissed -> gone.
+        # The event-meaning sets are imported from applications (single source of
+        # truth); a job is in exactly one of held / hidden / (still in a bucket).
         held: Dict[str, str] = {
-            jid: st.note for jid, st in states.items() if st.event == "held"
+            jid: st.note for jid, st in states.items()
+            if st.event in applications.HELD_EVENTS
         }
         hidden = {
             jid for jid, st in states.items()
-            if st.event in ("applied", "status_changed", "dismissed")
+            if st.event in applications.HIDDEN_FROM_BUCKETS
+            and st.event not in applications.HELD_EVENTS
         }
 
         buckets: Dict[str, List[dict]] = {b: [] for b in BUCKETS}
 
         # Newest-scored first; gate_run_at NULL sorts last. gate_verdict NULL
         # (ungated) is filtered by the bucket lookup below.
+        #
+        # Job.applied is excluded at the SQL level: a job applied to via the CLI
+        # (`a` in the queue) sets Job.applied but writes NO Application row, so
+        # the Application-log filter above cannot see it. Without this it would
+        # linger as a zombie card whose Apply button 409s forever ("already
+        # applied"). Applied == out of the worklist, full stop — this also keeps
+        # an applied job out of every bucket including HOLD.
         jobs = (
             session.query(Job)
             .filter(Job.gate_verdict.isnot(None))
+            .filter((Job.applied.is_(None)) | (Job.applied.is_(False)))
             .order_by(Job.gate_run_at.desc().nullslast(), Job.id.desc())
             .all()
         )
@@ -134,6 +146,68 @@ def get_classified_jobs(session=None) -> Dict[str, List[dict]]:
 def bucket_counts(classified: Dict[str, List[dict]]) -> Dict[str, int]:
     """Live per-bucket counts for the tab labels."""
     return {b: len(classified.get(b, [])) for b in BUCKETS}
+
+
+def _application_row(job: Optional[Job], state) -> dict:
+    """A flat row for the Applied/Dismissed tables. `job` may be None if the
+    Application log references a job no longer in the jobs table (defensive: a
+    scrape re-run could drop a row) — the table still shows the id + note rather
+    than crashing or hiding a tracked action."""
+    return {
+        "id": state.job_id,
+        "title": job.title if job else state.job_id,
+        "company": job.company if job else None,
+        "apply_link": (job.apply_link or job.job_url) if job else None,
+        "status": state.status,   # current lifecycle status (Applied table)
+        "note": state.note,
+        # applied_at lives on the Job row (mark_applied set it in the dual-write),
+        # not on the Application log; expose it as an ISO date for the Date column.
+        "applied_at": (job.applied_at.date().isoformat()
+                       if job and job.applied_at else None),
+    }
+
+
+def get_applications(session=None) -> Dict[str, List[dict]]:
+    """Return {"applied": [...], "dismissed": [...]} for the tracking tables.
+
+    Sourced from the Application log (latest row per job), NOT the gate verdict:
+      applied   = latest event in APPLIED_EVENTS (applied / status_changed),
+                  carrying the current lifecycle status + applied date.
+      dismissed = latest event is 'dismissed' (reversible via Restore).
+    Held jobs are NOT here — they render in the HOLD browse bucket. Read-only;
+    returns plain JSON-serialisable dicts. Newest action first (highest id).
+    """
+    own_session = session is None
+    session = session or get_session()
+    try:
+        states = applications.latest_states(session)
+        if not states:
+            return {"applied": [], "dismissed": []}
+
+        # One batched Job lookup for every tracked job, rather than per-row.
+        jobs = {
+            j.id: j for j in
+            session.query(Job).filter(Job.id.in_(states.keys())).all()
+        }
+
+        applied, dismissed = [], []
+        for jid, st in states.items():
+            row = _application_row(jobs.get(jid), st)
+            if st.event in applications.APPLIED_EVENTS:
+                applied.append((st.id, row))
+            elif st.event in applications.DISMISSED_EVENTS:
+                dismissed.append((st.id, row))
+
+        # Newest action first: sort by the Application row id (append order).
+        applied.sort(key=lambda p: p[0], reverse=True)
+        dismissed.sort(key=lambda p: p[0], reverse=True)
+        return {
+            "applied": [r for _, r in applied],
+            "dismissed": [r for _, r in dismissed],
+        }
+    finally:
+        if own_session:
+            session.close()
 
 
 def list_cvs(data_dir: Path = _DATA_DIR) -> List[str]:

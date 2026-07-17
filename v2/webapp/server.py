@@ -32,7 +32,9 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 from v2.webapp import applications
-from v2.webapp.queries import get_classified_jobs, bucket_counts, list_cvs
+from v2.webapp.queries import (
+    get_classified_jobs, get_applications, bucket_counts, list_cvs,
+)
 
 # The page lives next to this module. It may not exist yet (wired in build step
 # 3); the handler degrades to a plain placeholder rather than 500-ing so the
@@ -106,6 +108,8 @@ def dispatch_action(body: dict) -> dict:
             return applications.hold_job(job_id, note=note)
         if action == "restore":
             return applications.restore_job(job_id)
+        if action == "set_note":
+            return applications.set_note(job_id, note)
         if action == "set_status":
             status = body.get("status")
             if not isinstance(status, str):
@@ -120,13 +124,15 @@ def dispatch_action(body: dict) -> dict:
     raise _ActionError(400, f"unknown action {action!r}")
 
 
-def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs):
-    """Build the request-handler class, closing over the classified-jobs reader.
+def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs,
+                 applications_provider=get_applications):
+    """Build the request-handler class, closing over the read providers.
 
     `jobs_provider` is injectable so tests can point the server at a temp DB
     without touching data/jobs.db. It must return the same shape as
     `get_classified_jobs`: {bucket: [job_view, ...]}. `cvs_provider` is the
-    same seam for the CV picker list (plan §4/§6).
+    same seam for the CV picker list, and `applications_provider` for the
+    Applied/Dismissed tracking tables ({"applied": [...], "dismissed": [...]}).
     """
 
     class Handler(BaseHTTPRequestHandler):
@@ -146,21 +152,30 @@ def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs):
                 self._serve_error(403, "bad host")
                 return
             path = self.path.split("?", 1)[0]
-            if path == "/" or path.startswith("/index.html"):
-                self._serve_index()
-            elif path == "/api/jobs":
-                self._serve_json(_payload(jobs_provider))
-            elif path == "/api/cvs":
-                self._serve_json({"cvs": cvs_provider()})
-            elif path == "/api/health":
-                self._serve_json({"status": "ok"})
-            elif path == "/favicon.ico":
-                # No icon asset; answer 204 so the browser's automatic request
-                # doesn't log a 404 on every page load.
-                self.send_response(204)
-                self.end_headers()
-            else:
-                self._serve_error(404, "not found")
+            try:
+                if path == "/" or path.startswith("/index.html"):
+                    self._serve_index()
+                elif path == "/api/jobs":
+                    self._serve_json(_payload(jobs_provider))
+                elif path == "/api/applications":
+                    self._serve_json(applications_provider())
+                elif path == "/api/cvs":
+                    self._serve_json({"cvs": cvs_provider()})
+                elif path == "/api/health":
+                    self._serve_json({"status": "ok"})
+                elif path == "/favicon.ico":
+                    # No icon asset; answer 204 so the browser's automatic
+                    # request doesn't log a 404 on every page load.
+                    self.send_response(204)
+                    self.end_headers()
+                else:
+                    self._serve_error(404, "not found")
+            except Exception:
+                # A provider DB error (e.g. SQLite locked while the gate writes
+                # verdicts) must become an honest 500 the page can show, not a
+                # dropped connection the front-end misreads as "server down".
+                # Generic message — no str(exc) — so internals never leak.
+                self._serve_error(500, "internal error")
 
         def do_POST(self):
             if not self._host_is_local():
@@ -262,7 +277,7 @@ def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs):
 
 
 def make_server(host=HOST, port=PORT, jobs_provider=get_classified_jobs,
-                cvs_provider=list_cvs):
+                cvs_provider=list_cvs, applications_provider=get_applications):
     """Create (but do not start) the HTTP server bound to host:port.
 
     Threading so a slow browser fetch never blocks the next request; single
@@ -270,7 +285,8 @@ def make_server(host=HOST, port=PORT, jobs_provider=get_classified_jobs,
     port=0 to let the OS pick a free port (tests do this).
     """
     return ThreadingHTTPServer(
-        (host, port), make_handler(jobs_provider, cvs_provider))
+        (host, port),
+        make_handler(jobs_provider, cvs_provider, applications_provider))
 
 
 def serve(host=HOST, port=PORT):

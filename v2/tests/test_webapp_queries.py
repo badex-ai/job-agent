@@ -14,7 +14,8 @@ from sqlalchemy.orm import sessionmaker
 from shared.database.models import Base, Job, migrate_applications
 from v2.webapp import applications
 from v2.webapp.queries import (
-    BUCKETS, get_classified_jobs, bucket_counts, list_cvs, _tags,
+    BUCKETS, get_classified_jobs, get_applications, bucket_counts, list_cvs,
+    _tags,
 )
 
 
@@ -106,6 +107,28 @@ def test_restored_job_returns_to_its_gate_bucket(Session):
     s.close()
 
 
+def test_cli_applied_job_is_hidden_from_buckets(Session):
+    """A job applied to via the CLI sets Job.applied but writes NO Application
+    row. It must still leave the browse buckets (A1) — otherwise it lingers as a
+    zombie card whose Apply button 409s forever."""
+    s = Session()
+    _seed_job(s, id="cli-applied", gate_verdict="surface_priority", applied=True)
+    _seed_job(s, id="live", gate_verdict="surface_priority")
+    buckets = get_classified_jobs(session=s)
+    ids = [j["id"] for v in buckets.values() for j in v]
+    assert ids == ["live"]     # the applied job is gone from every bucket
+    s.close()
+
+
+def test_applied_job_never_lands_in_hold(Session):
+    """Applied == out of the worklist entirely, including HOLD."""
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface", applied=True)
+    buckets = get_classified_jobs(session=s)
+    assert all(v == [] for v in buckets.values())
+    s.close()
+
+
 def test_ungated_jobs_do_not_appear(Session):
     """A job the gate hasn't scored (gate_verdict NULL) is in no bucket."""
     s = Session()
@@ -189,6 +212,195 @@ def test_bucket_counts(Session):
     counts = bucket_counts(get_classified_jobs(session=s))
     assert counts == {"APPLY": 3, "CONSIDER": 0, "HOLD": 1, "SKIP": 0}
     s.close()
+
+
+# --- the tracking tables (Applied / Dismissed) -----------------------------
+
+def test_applied_job_appears_in_applied_table(Session):
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface_priority")
+    applications.apply_to_job("j1", note="sent with devops CV", session=s)
+
+    apps = get_applications(session=s)
+    assert [r["id"] for r in apps["applied"]] == ["j1"]
+    assert apps["dismissed"] == []
+    row = apps["applied"][0]
+    assert row["status"] == "applied"
+    assert row["note"] == "sent with devops CV"
+    assert row["applied_at"] is not None   # date set by mark_applied dual-write
+    s.close()
+
+
+def test_applied_row_reflects_latest_status(Session):
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface")
+    applications.apply_to_job("j1", session=s)
+    applications.set_status("j1", "interview", session=s)
+
+    apps = get_applications(session=s)
+    assert apps["applied"][0]["status"] == "interview"
+    s.close()
+
+
+def test_dismissed_job_appears_in_dismissed_table(Session):
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface")
+    applications.dismiss_job("j1", note="wrong stack", session=s)
+
+    apps = get_applications(session=s)
+    assert [r["id"] for r in apps["dismissed"]] == ["j1"]
+    assert apps["dismissed"][0]["note"] == "wrong stack"
+    assert apps["applied"] == []
+    s.close()
+
+
+def test_held_job_is_in_neither_tracking_table(Session):
+    """Held jobs live in the HOLD browse bucket, not the tracking tables."""
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface")
+    applications.hold_job("j1", session=s)
+
+    apps = get_applications(session=s)
+    assert apps["applied"] == []
+    assert apps["dismissed"] == []
+    s.close()
+
+
+def test_restored_job_leaves_dismissed_table(Session):
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface")
+    applications.dismiss_job("j1", session=s)
+    applications.restore_job("j1", session=s)
+
+    apps = get_applications(session=s)
+    assert apps["dismissed"] == []   # back in its gate bucket, off the table
+    s.close()
+
+
+def test_applications_newest_action_first(Session):
+    s = Session()
+    _seed_job(s, id="old", gate_verdict="surface")
+    _seed_job(s, id="new", gate_verdict="surface")
+    applications.apply_to_job("old", session=s)
+    applications.apply_to_job("new", session=s)
+
+    apps = get_applications(session=s)
+    assert [r["id"] for r in apps["applied"]] == ["new", "old"]
+    s.close()
+
+
+def test_application_row_tolerates_missing_job(Session):
+    """A tracked action on a job no longer in the jobs table still shows (id +
+    note), rather than crashing or silently dropping the action."""
+    s = Session()
+    applications.dismiss_job("ghost", note="left over", session=s)
+
+    apps = get_applications(session=s)
+    row = apps["dismissed"][0]
+    assert row["id"] == "ghost"
+    assert row["title"] == "ghost"      # falls back to the id
+    assert row["company"] is None
+    assert row["note"] == "left over"
+    s.close()
+
+
+def test_empty_applications_are_clean(Session):
+    s = Session()
+    assert get_applications(session=s) == {"applied": [], "dismissed": []}
+    s.close()
+
+
+# --- editable notes (set_note) ---------------------------------------------
+
+def test_set_note_on_applied_keeps_placement_and_status(Session):
+    """Editing an applied job's note re-appends its placement event, so it stays
+    in Applied with its current status — the note is not a move."""
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface")
+    applications.apply_to_job("j1", session=s)
+    applications.set_status("j1", "interview", session=s)
+    applications.set_note("j1", "recruiter emailed", session=s)
+
+    apps = get_applications(session=s)
+    assert [r["id"] for r in apps["applied"]] == ["j1"]
+    row = apps["applied"][0]
+    assert row["status"] == "interview"        # status carried forward
+    assert row["note"] == "recruiter emailed"
+    s.close()
+
+
+def test_set_note_on_dismissed_keeps_it_dismissed(Session):
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface")
+    applications.dismiss_job("j1", note="old", session=s)
+    applications.set_note("j1", "reconsider in Q3", session=s)
+
+    apps = get_applications(session=s)
+    assert [r["id"] for r in apps["dismissed"]] == ["j1"]
+    assert apps["dismissed"][0]["note"] == "reconsider in Q3"
+    s.close()
+
+
+def test_set_note_empty_clears_the_note(Session):
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface")
+    applications.apply_to_job("j1", note="draft", session=s)
+    applications.set_note("j1", "   ", session=s)  # whitespace -> cleared
+
+    apps = get_applications(session=s)
+    assert apps["applied"][0]["note"] is None
+    s.close()
+
+
+def test_set_note_does_not_pull_job_from_hold_bucket(Session):
+    """A note on a held job keeps it in HOLD (held is annotatable, not moved)."""
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface")
+    applications.hold_job("j1", session=s)
+    applications.set_note("j1", "waiting on band", session=s)
+
+    buckets = get_classified_jobs(session=s)
+    assert [j["id"] for j in buckets["HOLD"]] == ["j1"]
+    assert buckets["HOLD"][0]["note"] == "waiting on band"
+    s.close()
+
+
+def test_set_note_on_untouched_job_raises(Session):
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface")
+    with pytest.raises(ValueError):
+        applications.set_note("j1", "nope", session=s)
+    s.close()
+
+
+def test_set_note_on_restored_job_raises(Session):
+    """A restored job is back in its gate bucket with no placement — nothing to
+    annotate."""
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface")
+    applications.dismiss_job("j1", session=s)
+    applications.restore_job("j1", session=s)
+    with pytest.raises(ValueError):
+        applications.set_note("j1", "nope", session=s)
+    s.close()
+
+
+def test_event_meaning_sets_are_the_single_source(Session):
+    """Finding 7: queries derives its hidden/held sets from applications'
+    exported constants — the taxonomy lives in exactly one module. Guard against
+    a literal creeping back by asserting the partition is coherent."""
+    a = applications
+    # every hidden event is exactly one of applied/dismissed/held, nothing else.
+    assert a.HIDDEN_FROM_BUCKETS == (
+        a.APPLIED_EVENTS | a.DISMISSED_EVENTS | a.HELD_EVENTS)
+    # the three tab sets are disjoint (a latest event lands in one place).
+    assert a.APPLIED_EVENTS.isdisjoint(a.DISMISSED_EVENTS)
+    assert a.APPLIED_EVENTS.isdisjoint(a.HELD_EVENTS)
+    assert a.DISMISSED_EVENTS.isdisjoint(a.HELD_EVENTS)
+    # 'restored' returns a job to its bucket, so it hides nothing.
+    assert "restored" not in a.HIDDEN_FROM_BUCKETS
+    # the dead helper is gone (finding 7).
+    assert not hasattr(a, "actioned_job_ids")
 
 
 # --- the CV picker list ----------------------------------------------------

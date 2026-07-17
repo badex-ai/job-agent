@@ -23,7 +23,7 @@ from sqlalchemy.orm import sessionmaker
 from shared.database import models
 from shared.database.models import Application, Base, Job, migrate_applications
 from v2.webapp import applications
-from v2.webapp.queries import get_classified_jobs
+from v2.webapp.queries import get_classified_jobs, get_applications
 from v2.webapp.server import make_server
 
 
@@ -80,8 +80,16 @@ def server(Session):
         finally:
             s.close()
 
+    def temp_apps_provider():
+        s = Session()
+        try:
+            return get_applications(session=s)
+        finally:
+            s.close()
+
     httpd = make_server(host="127.0.0.1", port=0, jobs_provider=temp_provider,
-                        cvs_provider=lambda: ["cv_devops", "cv_frontend"])
+                        cvs_provider=lambda: ["cv_devops", "cv_frontend"],
+                        applications_provider=temp_apps_provider)
     host, port = httpd.server_address
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -213,6 +221,80 @@ def test_api_cvs_returns_the_picker_list(server):
     assert status == 200
     assert "application/json" in ctype
     assert data == {"cvs": ["cv_devops", "cv_frontend"]}
+
+
+def test_api_applications_empty_is_clean(server):
+    status, ctype, data = _get_json(server, "/api/applications")
+    assert status == 200
+    assert "application/json" in ctype
+    assert data == {"applied": [], "dismissed": []}
+
+
+def test_api_applications_reflects_writes(server, Session):
+    """A dismiss then an apply show up in the right tables over HTTP, against
+    the temp DB (the applications_provider is bound to it, not data/jobs.db)."""
+    _seed_decided(Session, "d1", "CONSIDER")
+    _seed_decided(Session, "a1", "APPLY")
+    _post_json(server, "/api/action", {"action": "dismiss", "job_id": "d1"})
+    _post_json(server, "/api/action", {"action": "apply", "job_id": "a1"})
+
+    _, _, data = _get_json(server, "/api/applications")
+    assert [r["id"] for r in data["applied"]] == ["a1"]
+    assert [r["id"] for r in data["dismissed"]] == ["d1"]
+    assert data["applied"][0]["status"] == "applied"
+
+
+def test_action_set_note_edits_applied_note(server, Session):
+    _seed_decided(Session, "a1", "APPLY")
+    _post_json(server, "/api/action", {"action": "apply", "job_id": "a1"})
+    status, data = _post_json(server, "/api/action",
+                              {"action": "set_note", "job_id": "a1",
+                               "note": "recruiter emailed"})
+    assert status == 200
+    assert data["ok"] is True
+
+    _, _, apps = _get_json(server, "/api/applications")
+    assert [r["id"] for r in apps["applied"]] == ["a1"]
+    assert apps["applied"][0]["note"] == "recruiter emailed"
+    assert apps["applied"][0]["status"] == "applied"  # placement/status intact
+
+
+def test_action_set_note_on_untouched_job_is_400(server, Session):
+    _seed_decided(Session, "c1", "CONSIDER")
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _post_json(server, "/api/action",
+                   {"action": "set_note", "job_id": "c1", "note": "x"})
+    assert exc.value.code == 400
+
+
+def test_get_provider_error_is_500_not_dropped_connection():
+    """C2: a read-path provider that raises (e.g. a locked DB during a gate run)
+    must return an honest 500 the page can show, not drop the connection."""
+    def boom():
+        raise RuntimeError("db locked")
+    httpd = make_server(host="127.0.0.1", port=0, jobs_provider=boom,
+                        cvs_provider=lambda: [], applications_provider=lambda: {})
+    host, port = httpd.server_address
+    thread = threading.Thread(target=httpd.serve_forever, daemon=True)
+    thread.start()
+    try:
+        with pytest.raises(urllib.error.HTTPError) as exc:
+            _get(f"http://{host}:{port}", "/api/jobs")
+        assert exc.value.code == 500
+    finally:
+        httpd.shutdown()
+        httpd.server_close()
+        thread.join(timeout=5)
+
+
+def test_api_applications_rejects_foreign_host(server):
+    """The DNS-rebind Host guard covers this read too (it exposes hold/apply
+    notes), like every other GET."""
+    req = urllib.request.Request(server + "/api/applications",
+                                 headers={"Host": "evil.example.com"})
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        urllib.request.urlopen(req, timeout=5)
+    assert exc.value.code == 403
 
 
 def test_health(server):
