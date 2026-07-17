@@ -74,6 +74,15 @@ THROTTLE_RATIO = 1.5        # latency this-×-baseline => assume throttling
 COOLDOWN_MAX_S = 240.0
 
 
+def _within_window(last_seen, now) -> bool:
+    """True if last_seen is within DUP_WINDOW_DAYS of now (so a match is a
+    re-post, not a re-opening). A missing timestamp is treated as in-window so a
+    row with no scraped_at still dedups rather than duplicating unboundedly."""
+    if last_seen is None:
+        return True
+    return (now - last_seen).days < dedup.DUP_WINDOW_DAYS
+
+
 def _merge_into(existing: Job, incoming: dict) -> None:
     """Fold a duplicate incoming posting into the row we keep.
 
@@ -82,7 +91,9 @@ def _merge_into(existing: Job, incoming: dict) -> None:
     view depends on). Refreshes only volatile fields: fill a blank description
     from the incoming side; refresh apply_link/job_url when the merge was made
     with both descriptions present (high confidence) or the existing row was
-    blank; always take the freshest date_posted.
+    blank; take the freshest non-junk date_posted; and refresh scraped_at to
+    NOW so the recency window (dedup.DUP_WINDOW_DAYS) measures the gap since the
+    role was LAST seen, not first seen.
     """
     inc_desc = incoming.get("description") or ""
     existing_blank = dedup.is_blank(existing.description)
@@ -94,8 +105,10 @@ def _merge_into(existing: Job, incoming: dict) -> None:
             existing.apply_link = incoming["apply_link"]
         if incoming.get("job_url"):
             existing.job_url = incoming["job_url"]
-    if incoming.get("date_posted"):
-        existing.date_posted = incoming["date_posted"]
+    inc_date = dedup.clean_date(incoming.get("date_posted"))
+    if inc_date:
+        existing.date_posted = inc_date
+    existing.scraped_at = datetime.utcnow()
 
 
 def _store_new_jobs(session, raw_jobs: list[dict]) -> int:
@@ -123,10 +136,16 @@ def _store_new_jobs(session, raw_jobs: list[dict]) -> int:
             _merge_into(by_id[jid], j)
             continue
         key = dedup.content_key(j)
-        match = next((r for r in by_key.get(key, [])
-                      if dedup.is_duplicate(r.description, j.get("description") or "")),
-                     None)
-        if match is not None:                  # same role, different id
+        # A content match is a duplicate only if it was last seen within the
+        # recency window; a matching row scraped longer ago is a genuine
+        # re-opening and must fall through to be stored as a new row.
+        now = datetime.utcnow()
+        match = next(
+            (r for r in by_key.get(key, [])
+             if dedup.is_duplicate(r.description, j.get("description") or "")
+             and _within_window(r.scraped_at, now)),
+            None)
+        if match is not None:                  # same role, seen recently
             _merge_into(match, j)
             continue
         row = Job(**{k: j.get(k) for k in SCRAPE_FIELDS if k in j}, status="new")

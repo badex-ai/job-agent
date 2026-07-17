@@ -82,3 +82,15 @@ def test_near_identical_above_threshold_merges():
     b = "Build and operate Kubernetes clusters with Terraform and AWS EKS."
     assert dedup.desc_jaccard(a, b) >= dedup.DUP_JACCARD
     assert dedup.is_duplicate(a, b) is True
+
+
+# --- clean_date: junk pandas-null strings must be treated as absent -----------
+
+def test_clean_date_rejects_pandas_junk():
+    for junk in ("None", "nan", "NaT", "", None, "NaN"):
+        assert dedup.clean_date(junk) == ""
+
+
+def test_clean_date_keeps_real_dates():
+    assert dedup.clean_date("2026-05-07") == "2026-05-07"
+    assert dedup.clean_date("  2026-05-07  ") == "2026-05-07"

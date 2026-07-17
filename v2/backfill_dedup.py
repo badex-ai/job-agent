@@ -33,8 +33,13 @@ LABELS_PATH = Path("data/labels.json")
 
 
 def _labeled_ids() -> set[str]:
+    # Refuse rather than run with an empty guard: labels.json is the ONLY thing
+    # protecting ungated labeled rows from the deletable predicate. A missing
+    # file must abort, not silently permit deleting ground-truth rows.
     if not LABELS_PATH.exists():
-        return set()
+        raise SystemExit(f"refusing to run: {LABELS_PATH} not found — the "
+                         "labeled-row guard would be empty and could delete "
+                         "ground-truth rows.")
     return {str(r["id"]) for r in json.loads(LABELS_PATH.read_text()) if r.get("id")}
 
 
@@ -59,8 +64,9 @@ def _fold(canonical: Job, others: list[Job]) -> None:
             canonical.apply_link = o.apply_link
         if o.job_url:
             canonical.job_url = o.job_url
-        if o.date_posted:
-            canonical.date_posted = o.date_posted
+        o_date = dedup.clean_date(o.date_posted)
+        if o_date:
+            canonical.date_posted = o_date
 
 
 def plan(session):

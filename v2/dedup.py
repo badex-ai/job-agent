@@ -26,6 +26,25 @@ import re
 # wide empty margin between the modes.
 DUP_JACCARD = 0.65
 
+# Dedup only fires when the last sighting of a matching role was within this many
+# days: LinkedIn re-spams the SAME posting within days, but a role genuinely
+# RE-OPENED months later is a fresh chance to apply and must NOT be buried (the
+# expensive FP under the design notes). The window is measured since the role was
+# LAST seen and refreshed on every merge, so a continuously-spammed post stays
+# deduped and a role only re-surfaces after a real gap of silence.
+DUP_WINDOW_DAYS = 30
+
+# The scraper stringifies pandas nulls, so date_posted often arrives as the
+# literal strings "None"/"nan"/"NaT" rather than empty — treat those as absent so
+# a merge never overwrites a real date with junk.
+_JUNK_DATE = {"", "None", "nan", "NaT", "none", "NaN"}
+
+
+def clean_date(value) -> str:
+    """Return a usable date string, or '' for pandas-null junk ('None'/'nan')."""
+    s = "" if value is None else str(value).strip()
+    return "" if s in _JUNK_DATE else s
+
 _COMPANY_SUFFIX_RE = re.compile(r"\b(inc|llc|ltd|gmbh|co|corp|limited)\b")
 _TAG_RE = re.compile(r"<[^>]+>")
 _NON_ALNUM_RE = re.compile(r"[^a-z0-9]+")
