@@ -289,14 +289,19 @@ def scrape_linkedin_jobs(keyword: str) -> List[Dict]:
     """
     try:
         from jobspy import scrape_jobs
+        # linkedin_fetch_description pulls each job's body in a per-job request:
+        # without it JobSpy's LinkedIn search returns title-only rows, which the
+        # gate cannot score. It is slower and LinkedIn-rate-limited (the reason
+        # Remotive/Himalayas were preferred), the accepted cost of a usable row.
+        # hours_old=2 removed — like Indeed's, that window is almost always empty
+        # and silently starved this source; is_remote carries the remote filter.
         results = scrape_jobs(
             site_name=["linkedin"],
             search_term=keyword,
-            location="Worldwide",
             results_wanted=15,
-            hours_old=2,
             is_remote=True,
             description_format="markdown",
+            linkedin_fetch_description=True,
         )
         jobs = []
         for _, row in results.iterrows():
