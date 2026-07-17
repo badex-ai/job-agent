@@ -1,0 +1,155 @@
+"""Tests for the web-UI application-lifecycle logic (v2/webapp/applications.py)."""
+import pytest
+from sqlalchemy import create_engine
+from sqlalchemy.orm import sessionmaker
+
+from shared.database import models
+from shared.database.models import Base, Job, Application
+from v2.webapp import applications as app
+
+
+@pytest.fixture
+def session(tmp_path):
+    engine = create_engine(f"sqlite:///{tmp_path / 'a.db'}", echo=False)
+    Base.metadata.create_all(engine)
+    s = sessionmaker(bind=engine)()
+    s.add(Job(id="j1", title="DevOps Engineer", company="Acme",
+              gate_verdict="surface_priority"))
+    s.commit()
+    return s
+
+
+@pytest.fixture
+def db(tmp_path, monkeypatch):
+    """Point the module's OWN get_session() at a temp DB, so the sessionless
+    (default) code path — the one the HTTP handler uses — is actually exercised."""
+    engine = create_engine(f"sqlite:///{tmp_path / 'own.db'}", echo=False)
+    Base.metadata.create_all(engine)
+    Maker = sessionmaker(bind=engine)
+    monkeypatch.setattr(models, "get_session", Maker)
+    monkeypatch.setattr(app, "get_session", Maker)
+    monkeypatch.setattr("shared.database.tracking.get_session", Maker)
+    s = Maker()
+    s.add(Job(id="j1", title="DevOps Engineer", company="Acme",
+              gate_verdict="surface_priority"))
+    s.commit()
+    s.close()
+    return Maker
+
+
+def test_dismiss_hides_job_from_buckets(session):
+    app.dismiss_job("j1", session=session)
+    assert "j1" in app.actioned_job_ids(session)
+
+
+def test_hold_hides_job_from_buckets(session):
+    app.hold_job("j1", session=session)
+    assert "j1" in app.actioned_job_ids(session)
+
+
+def test_restore_unhides_a_dismissed_job(session):
+    app.dismiss_job("j1", session=session)
+    app.restore_job("j1", session=session)          # latest event = restored
+    assert "j1" not in app.actioned_job_ids(session)  # back in its bucket
+
+
+def test_latest_row_wins(session):
+    app.hold_job("j1", session=session)
+    app.dismiss_job("j1", session=session)          # later row supersedes
+    latest = app.latest_states(session)["j1"]
+    assert latest.event == "dismissed"
+
+
+def test_apply_returns_dict_row(session):
+    row, err = app.apply_to_job("j1", session=session)
+    assert err is None
+    assert row["event"] == "applied"
+    assert row["status"] == "applied"
+
+
+def test_apply_dual_writes_job_applied_flag(session):
+    # The Review-flagged invariant: Apply must mark_applied so the CLI's
+    # double-apply guard (Job.applied) stays in sync with the web UI.
+    app.apply_to_job("j1", session=session)
+    job = session.query(Job).filter(Job.id == "j1").one()
+    assert job.applied is True
+    assert job.status == "applied"
+
+
+def test_apply_is_atomic_no_orphan_log_on_failure(session):
+    # Torn-write fix: applying a NON-existent job must leave NO 'applied' log row
+    # (mark_applied fails -> the whole transaction rolls back).
+    row, err = app.apply_to_job("ghost", session=session)
+    assert row is None and err is not None
+    assert session.query(Application).filter(Application.job_id == "ghost").count() == 0
+    assert "ghost" not in app.actioned_job_ids(session)
+
+
+def test_dismiss_never_mutates_job_status(session):
+    # Dismiss is a reversible view preference — it must NOT touch Job.status
+    # (that would silently drain the CLI rescue queue).
+    before = session.query(Job).filter(Job.id == "j1").one().status
+    app.dismiss_job("j1", session=session)
+    after = session.query(Job).filter(Job.id == "j1").one().status
+    assert after == before  # untouched
+
+
+def test_set_status_advances_lifecycle(session):
+    app.apply_to_job("j1", session=session)
+    app.set_status("j1", "interview", session=session)
+    assert app.latest_states(session)["j1"].status == "interview"
+
+
+def test_set_status_rejects_unknown_value(session):
+    with pytest.raises(ValueError):
+        app.set_status("j1", "hired_immediately", session=session)
+
+
+def test_set_status_on_unapplied_job_raises(session):
+    # Guard: no status change on a job that was never applied to (phantom entry).
+    with pytest.raises(ValueError):
+        app.set_status("j1", "interview", session=session)
+
+
+def test_restore_on_applied_job_raises(session):
+    # Guard: restore is only for dismissed/held jobs; restoring an applied job
+    # is incoherent (it would drop out of the Applied tab while Job.applied=True).
+    app.apply_to_job("j1", session=session)
+    with pytest.raises(ValueError):
+        app.restore_job("j1", session=session)
+
+
+def test_status_change_not_counted_as_new_application(session):
+    # 'status_changed' is a distinct event so lifecycle edits never inflate the
+    # count of real applications.
+    app.apply_to_job("j1", session=session)
+    app.set_status("j1", "interview", session=session)
+    app.set_status("j1", "offer", session=session)
+    applied_rows = (session.query(Application)
+                    .filter(Application.job_id == "j1",
+                            Application.event == "applied").count())
+    assert applied_rows == 1  # exactly one real application, not three
+
+
+def test_dismiss_does_not_touch_gate_verdict(session):
+    # The gate verdict is immutable ground truth; an action never rewrites it.
+    app.dismiss_job("j1", session=session)
+    job = session.query(Job).filter(Job.id == "j1").one()
+    assert job.gate_verdict == "surface_priority"
+
+
+# --- the sessionless (default) code path the HTTP handler will use ------------
+
+def test_dismiss_sessionless_returns_serialisable_dict(db):
+    # Regression for the DetachedInstanceError: the default path must return a
+    # plain dict usable AFTER its own session closed.
+    row = app.dismiss_job("j1")
+    assert row["job_id"] == "j1" and row["event"] == "dismissed"
+
+
+def test_apply_sessionless_dual_writes(db):
+    row, err = app.apply_to_job("j1")
+    assert err is None and row["event"] == "applied"
+    s = db()
+    assert s.query(Job).filter(Job.id == "j1").one().applied is True
+    s.close()

@@ -120,6 +120,34 @@ class Decision(Base):
     source_view   = Column(String)                     # 'queue' | 'rescue' (selection context, §7)
 
 
+class Application(Base):
+    """Append-only application-lifecycle log — one row per web-UI action on a job.
+
+    Deliberately SEPARATE from Decision: Decision.human_label is the gate's
+    training signal (validated against APPLY/CONSIDER/HOLD/SKIP, exported for
+    model comparison), so post-apply lifecycle events must never pollute it.
+    This table owns "what I did about a job", Decision owns "what a job is worth".
+
+    Latest row per job_id (by id) IS the current state. Rows are inserted, never
+    updated or deleted — Restore appends a 'restored' event rather than deleting,
+    a note edit appends a fresh row, so the whole history survives. The web-UI
+    Applied/Dismissed tables render from this table exclusively; the gate verdict
+    on the Job row is never mutated.
+    """
+    __tablename__ = "applications"
+
+    id         = Column(Integer, primary_key=True, autoincrement=True)
+    job_id     = Column(String)                        # FK -> jobs.id (Job.id is a String)
+    created_at = Column(DateTime, default=datetime.utcnow)
+
+    # the action taken. 'held' parks a job (manual Hold bucket); 'restored'
+    # un-dismisses/un-holds it back to its gate bucket.
+    event      = Column(String)                         # applied / dismissed / held / restored
+    # post-apply lifecycle, only meaningful once event has reached 'applied':
+    status     = Column(String)                         # applied / interview / offer / rejected / ghosted
+    note       = Column(Text)                           # optional free text (Notes column)
+
+
 def get_engine():
     os.makedirs(os.path.dirname(DB_PATH), exist_ok=True)
     return create_engine(f"sqlite:///{DB_PATH}", echo=False)
@@ -194,8 +222,22 @@ def migrate_decisions(engine=None) -> bool:
     return not existed
 
 
+def migrate_applications(engine=None) -> bool:
+    """Create the append-only `applications` table on an existing DB. Idempotent:
+    create_all never touches an existing table, so re-running is a no-op. Mirrors
+    migrate_decisions. Returns True if the table was just created, False if it
+    already existed."""
+    from sqlalchemy import inspect
+    engine = engine or get_engine()
+    existed = inspect(engine).has_table("applications")
+    Base.metadata.create_all(engine)  # creates `applications` if missing; no-op otherwise
+    return not existed
+
+
 if __name__ == "__main__":
     added = migrate_gate_columns()
     print(f"[migrate] gate columns added: {added or 'none (already present)'}")
     created = migrate_decisions()
     print(f"[migrate] decisions table: {'created' if created else 'already present'}")
+    created = migrate_applications()
+    print(f"[migrate] applications table: {'created' if created else 'already present'}")

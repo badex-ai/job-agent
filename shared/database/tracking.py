@@ -45,7 +45,8 @@ def mark_applied(
     job_id: str,
     via: str,
     version: Optional[str] = None,
-    tone: Optional[str] = None
+    tone: Optional[str] = None,
+    session=None
 ) -> Tuple[bool, Optional[str]]:
     """
     Record that user applied to a job.
@@ -57,11 +58,16 @@ def mark_applied(
         via: Channel used - "website" | "linkedin" | "email"
         version: Message version for A/B testing - "A" | "B" | "C" (optional)
         tone: Message tone - "formal" | "casual" | "story" (optional)
+        session: optional SQLAlchemy session — when supplied (e.g. the web UI's
+            Apply dual-write), the caller owns commit/close so both writes share
+            one transaction; when None, a session is opened and closed here as
+            before (the CLI path, unchanged).
 
     Returns:
         Tuple of (success: bool, error_message: Optional[str])
     """
-    session = get_session()
+    own = session is None
+    session = session or get_session()
     try:
         job = session.query(Job).filter(Job.id == job_id).first()
         if not job:
@@ -81,13 +87,21 @@ def mark_applied(
         job.followup_count = 0
         job.next_followup_due = _calculate_next_followup(now, 0)
 
-        session.commit()
+        # When we own the session, commit and finish. When a session is supplied
+        # (the web-UI dual-write), only FLUSH — the caller owns the single commit
+        # so the log row and this Job update land in one atomic transaction.
+        if own:
+            session.commit()
+        else:
+            session.flush()
         return True, None
     except Exception as e:
-        session.rollback()
+        if own:
+            session.rollback()
         return False, str(e)
     finally:
-        session.close()
+        if own:
+            session.close()
 
 
 def mark_followup_sent(job_id: str) -> Tuple[bool, Optional[str]]:
