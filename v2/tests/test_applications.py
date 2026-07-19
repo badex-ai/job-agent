@@ -197,3 +197,81 @@ def test_apply_sessionless_dual_writes(db):
     s = db()
     assert s.query(Job).filter(Job.id == "j1").one().applied is True
     s.close()
+
+
+# --- B2: record which CV was sent ---------------------------------------------
+
+def test_apply_records_the_cv(session):
+    # The core B2 datum: the CV sent on apply lands on the append-only row.
+    row, err = app.apply_to_job("j1", cv="cv_devops", session=session)
+    assert err is None
+    assert row["cv"] == "cv_devops"
+    assert app.latest_states(session)["j1"].cv == "cv_devops"
+
+
+def test_apply_with_no_cv_stores_null(session):
+    # Apply must proceed with cv=NULL when no CV was picked (list_cvs()==[]).
+    row, err = app.apply_to_job("j1", session=session)
+    assert err is None
+    assert row["cv"] is None
+
+
+def test_status_change_carries_cv_forward(session):
+    # The training datum must survive a status change — set_status re-appends
+    # with the latest row's cv, not None.
+    app.apply_to_job("j1", cv="cv_devops", session=session)
+    app.set_status("j1", "interview", session=session)
+    assert app.latest_states(session)["j1"].cv == "cv_devops"
+
+
+def test_status_change_no_longer_wipes_the_note(session):
+    # Review-flagged bug fixed: set_status used to re-append with note=None,
+    # silently erasing the displayed note on the first lifecycle change.
+    app.apply_to_job("j1", note="sent Tuesday", cv="cv_devops", session=session)
+    app.set_status("j1", "interview", session=session)
+    latest = app.latest_states(session)["j1"]
+    assert latest.note == "sent Tuesday"   # carried, not wiped
+    assert latest.cv == "cv_devops"
+
+
+def test_set_note_carries_cv_forward(session):
+    app.apply_to_job("j1", cv="cv_frontend", session=session)
+    app.set_note("j1", "recruiter emailed", session=session)
+    assert app.latest_states(session)["j1"].cv == "cv_frontend"
+
+
+def test_set_cv_corrects_the_recorded_cv(session):
+    app.apply_to_job("j1", cv="cv_devops", session=session)
+    row = app.set_cv("j1", "cv_fullstack", session=session)
+    assert row["cv"] == "cv_fullstack"
+    latest = app.latest_states(session)["j1"]
+    assert latest.cv == "cv_fullstack"
+    assert latest.event == "applied"       # placement unchanged (not a move)
+
+
+def test_set_cv_carries_status_and_note_forward(session):
+    app.apply_to_job("j1", note="note A", cv="cv_devops", session=session)
+    app.set_status("j1", "interview", session=session)
+    app.set_cv("j1", "cv_frontend", session=session)
+    latest = app.latest_states(session)["j1"]
+    assert latest.status == "interview"    # status carried forward
+    assert latest.note == "note A"         # note carried forward
+    assert latest.cv == "cv_frontend"
+
+
+def test_set_cv_empty_clears_it(session):
+    app.apply_to_job("j1", cv="cv_devops", session=session)
+    app.set_cv("j1", "   ", session=session)   # whitespace -> NULL
+    assert app.latest_states(session)["j1"].cv is None
+
+
+def test_set_cv_on_unapplied_job_raises(session):
+    # cv is meaningless on a job that was never applied to.
+    with pytest.raises(ValueError):
+        app.set_cv("j1", "cv_devops", session=session)
+
+
+def test_set_cv_on_dismissed_job_raises(session):
+    app.dismiss_job("j1", session=session)
+    with pytest.raises(ValueError):
+        app.set_cv("j1", "cv_devops", session=session)

@@ -30,10 +30,11 @@ a transient "database is locked". No app-level lock is added for that reason.
 import json
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
+from urllib.parse import parse_qs, urlsplit
 
 from v2.webapp import applications
 from v2.webapp.queries import (
-    get_classified_jobs, get_applications, bucket_counts, list_cvs,
+    get_classified_jobs, get_applications, bucket_counts, list_cvs, cv_text,
 )
 
 # The page lives next to this module. It may not exist yet (wired in build step
@@ -86,17 +87,20 @@ def dispatch_action(body: dict) -> dict:
     action = body.get("action")
     job_id = body.get("job_id")
     note = body.get("note")
+    cv = body.get("cv")
     if not isinstance(job_id, str) or not job_id:
         raise _ActionError(400, "missing or invalid job_id")
-    # note reaches the DB column directly; a non-string (dict/list) would raise
-    # a ProgrammingError inside the applications layer, not a ValueError, and
-    # escape as an unanswered 500. Validate it here as str|None.
+    # note/cv reach DB columns directly; a non-string (dict/list) would raise a
+    # ProgrammingError inside the applications layer, not a ValueError, and
+    # escape as an unanswered 500. Validate them here as str|None.
     if note is not None and not isinstance(note, str):
         raise _ActionError(400, "note must be a string")
+    if cv is not None and not isinstance(cv, str):
+        raise _ActionError(400, "cv must be a string")
 
     try:
         if action == "apply":
-            row, err = applications.apply_to_job(job_id, note=note)
+            row, err = applications.apply_to_job(job_id, note=note, cv=cv)
             if err is not None:
                 # mark_applied refused (unknown job / already applied): a
                 # conflict with existing state, not a malformed request.
@@ -110,6 +114,8 @@ def dispatch_action(body: dict) -> dict:
             return applications.restore_job(job_id)
         if action == "set_note":
             return applications.set_note(job_id, note)
+        if action == "set_cv":
+            return applications.set_cv(job_id, cv)
         if action == "set_status":
             status = body.get("status")
             if not isinstance(status, str):
@@ -125,14 +131,17 @@ def dispatch_action(body: dict) -> dict:
 
 
 def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs,
-                 applications_provider=get_applications):
+                 applications_provider=get_applications,
+                 cv_text_provider=cv_text):
     """Build the request-handler class, closing over the read providers.
 
     `jobs_provider` is injectable so tests can point the server at a temp DB
     without touching data/jobs.db. It must return the same shape as
     `get_classified_jobs`: {bucket: [job_view, ...]}. `cvs_provider` is the
-    same seam for the CV picker list, and `applications_provider` for the
-    Applied/Dismissed tracking tables ({"applied": [...], "dismissed": [...]}).
+    same seam for the CV picker list, `applications_provider` for the
+    Applied/Dismissed tracking tables ({"applied": [...], "dismissed": [...]}),
+    and `cv_text_provider(name) -> str|None` serves one CV's raw text for the
+    copy-CV-text button.
     """
 
     class Handler(BaseHTTPRequestHandler):
@@ -161,6 +170,8 @@ def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs,
                     self._serve_json(applications_provider())
                 elif path == "/api/cvs":
                     self._serve_json({"cvs": cvs_provider()})
+                elif path == "/api/cv-text":
+                    self._serve_cv_text()
                 elif path == "/api/health":
                     self._serve_json({"status": "ok"})
                 elif path == "/favicon.ico":
@@ -246,6 +257,18 @@ def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs,
                 return None
             return body
 
+        def _serve_cv_text(self):
+            """Serve one CV's raw text as JSON: /api/cv-text?name=cv_devops.
+            The provider validates `name` against the real CV list, so a bad or
+            traversal name yields None -> 404 rather than reaching the disk."""
+            qs = parse_qs(urlsplit(self.path).query)
+            name = (qs.get("name") or [""])[0]
+            text = cv_text_provider(name)
+            if text is None:
+                self._serve_error(404, "unknown cv")
+                return
+            self._serve_json({"name": name, "text": text})
+
         def _serve_index(self):
             if INDEX_FILE.exists():
                 body = INDEX_FILE.read_bytes()
@@ -277,7 +300,8 @@ def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs,
 
 
 def make_server(host=HOST, port=PORT, jobs_provider=get_classified_jobs,
-                cvs_provider=list_cvs, applications_provider=get_applications):
+                cvs_provider=list_cvs, applications_provider=get_applications,
+                cv_text_provider=cv_text):
     """Create (but do not start) the HTTP server bound to host:port.
 
     Threading so a slow browser fetch never blocks the next request; single
@@ -286,7 +310,8 @@ def make_server(host=HOST, port=PORT, jobs_provider=get_classified_jobs,
     """
     return ThreadingHTTPServer(
         (host, port),
-        make_handler(jobs_provider, cvs_provider, applications_provider))
+        make_handler(jobs_provider, cvs_provider, applications_provider,
+                     cv_text_provider))
 
 
 def serve(host=HOST, port=PORT):

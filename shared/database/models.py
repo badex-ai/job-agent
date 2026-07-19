@@ -146,6 +146,11 @@ class Application(Base):
     # post-apply lifecycle, only meaningful once event has reached 'applied':
     status     = Column(String)                         # applied / interview / offer / rejected / ghosted
     note       = Column(Text)                           # optional free text (Notes column)
+    # which CV was sent on this application (e.g. 'cv_devops'). Recorded on the
+    # 'applied' row and carried forward by later edits, so the (job, cv, outcome)
+    # triple survives for the deferred CV-vs-job scoring layer. NULL when no CV
+    # was selected (e.g. no cv_*.txt on disk) or on non-apply events.
+    cv         = Column(String)
 
 
 def get_engine():
@@ -234,6 +239,33 @@ def migrate_applications(engine=None) -> bool:
     return not existed
 
 
+# Columns added to `applications` after it first shipped. Like _GATE_COLUMNS,
+# these need an explicit ALTER on a DB where the table already exists —
+# create_all() only adds whole tables, never a column to an existing one.
+_APPLICATION_COLUMNS = {
+    "cv": "VARCHAR",
+}
+
+
+def migrate_application_columns(engine=None) -> list:
+    """Add any missing column to an existing applications table. Idempotent:
+    re-running is a no-op once the columns exist. Mirrors migrate_gate_columns.
+    Returns the columns it added."""
+    from sqlalchemy import text
+    engine = engine or get_engine()
+    Base.metadata.create_all(engine)  # fresh DB: table + columns exist already
+    added = []
+    with engine.begin() as conn:
+        existing = {row[1] for row in
+                    conn.execute(text("PRAGMA table_info(applications)"))}
+        for col, sqltype in _APPLICATION_COLUMNS.items():
+            if col not in existing:
+                conn.execute(
+                    text(f"ALTER TABLE applications ADD COLUMN {col} {sqltype}"))
+                added.append(col)
+    return added
+
+
 if __name__ == "__main__":
     added = migrate_gate_columns()
     print(f"[migrate] gate columns added: {added or 'none (already present)'}")
@@ -241,3 +273,5 @@ if __name__ == "__main__":
     print(f"[migrate] decisions table: {'created' if created else 'already present'}")
     created = migrate_applications()
     print(f"[migrate] applications table: {'created' if created else 'already present'}")
+    added = migrate_application_columns()
+    print(f"[migrate] application columns added: {added or 'none (already present)'}")

@@ -51,7 +51,7 @@ HIDDEN_FROM_BUCKETS = APPLIED_EVENTS | DISMISSED_EVENTS | HELD_EVENTS
 
 def _as_dict(row: Application) -> dict:
     return {"id": row.id, "job_id": row.job_id, "event": row.event,
-            "status": row.status, "note": row.note}
+            "status": row.status, "note": row.note, "cv": row.cv}
 
 
 def latest_states(session=None) -> Dict[str, Application]:
@@ -88,20 +88,28 @@ def _latest_event(session, job_id: str) -> Optional[str]:
 
 
 def _append(session, job_id: str, event: str, status: Optional[str],
-            note: Optional[str]) -> Application:
+            note: Optional[str], cv: Optional[str] = None) -> Application:
     """Stage one append-only row. FLUSHes (assigns the id) but does NOT commit —
-    the caller owns the single commit so multi-write actions stay atomic."""
-    row = Application(job_id=job_id, event=event, status=status, note=note)
+    the caller owns the single commit so multi-write actions stay atomic.
+
+    `cv` records which CV was sent (only meaningful on the applied lifecycle);
+    re-append sites carry the latest row's cv forward so an edit never drops it.
+    """
+    row = Application(job_id=job_id, event=event, status=status, note=note,
+                      cv=cv)
     session.add(row)
     session.flush()
     return row
 
 
-def apply_to_job(job_id: str, note: Optional[str] = None, session=None):
+def apply_to_job(job_id: str, note: Optional[str] = None,
+                 cv: Optional[str] = None, session=None):
     """Record an application: append an `applied` row AND mark_applied, atomically.
 
     Both writes share this session and ONE commit; on any failure both roll back,
-    so the log never claims 'applied' while Job.applied stays False.
+    so the log never claims 'applied' while Job.applied stays False. `cv` is the
+    CV that was sent (e.g. 'cv_devops'), captured here because the (job, cv,
+    outcome) triple is unrecoverable after the fact; None when no CV was picked.
     Returns (dict|None, error).
     """
     own = session is None
@@ -114,7 +122,7 @@ def apply_to_job(job_id: str, note: Optional[str] = None, session=None):
         # schedule for a job applied days ago. Refuse instead.
         if session.query(Job.applied).filter(Job.id == job_id).scalar():
             return None, f"{job_id} is already applied"
-        row = _append(session, job_id, "applied", "applied", note)
+        row = _append(session, job_id, "applied", "applied", note, cv)
         ok, err = tracking.mark_applied(job_id, via="website", session=session)
         if not ok:
             session.rollback()
@@ -168,10 +176,16 @@ def set_status(job_id: str, status: str, session=None) -> dict:
     own = session is None
     session = session or get_session()
     try:
-        if _latest_event(session, job_id) not in APPLIED_EVENTS:
+        latest = _latest_row(session, job_id)
+        if not latest or latest.event not in APPLIED_EVENTS:
             raise ValueError(
                 f"cannot set status on {job_id!r}: it has not been applied to")
-        row = _append(session, job_id, "status_changed", status, None)
+        # Carry the current note AND cv forward. Appending with note=None here
+        # would silently wipe the displayed note (set_note re-reads the latest
+        # row), and dropping cv would destroy the training datum on the first
+        # status change — so both ride along with the new status.
+        row = _append(session, job_id, "status_changed", status,
+                      latest.note, latest.cv)
         session.commit()
         return _as_dict(row)
     finally:
@@ -201,8 +215,36 @@ def set_note(job_id: str, note: Optional[str], session=None) -> dict:
             raise ValueError(
                 f"cannot set a note on {job_id!r}: its latest event is "
                 f"{event!r}, which is not a job you can annotate")
-        # carry the current status forward (only meaningful for applied rows).
-        row = _append(session, job_id, event, latest.status, clean)
+        # carry the current status AND cv forward (both only meaningful for
+        # applied rows) so editing the note never drops which CV was sent.
+        row = _append(session, job_id, event, latest.status, clean, latest.cv)
+        session.commit()
+        return _as_dict(row)
+    finally:
+        if own:
+            session.close()
+
+
+def set_cv(job_id: str, cv: Optional[str], session=None) -> dict:
+    """Correct which CV an applied job records — without moving it.
+
+    Same re-append mechanism as set_note: the tab a job sits in is decided by its
+    latest event, so we re-append the current placement event with the new cv,
+    carrying its status and note forward. Legal only on an APPLIED job (cv is
+    meaningless on a dismissed/held row). Empty/blank cv stores NULL. This is the
+    click-to-edit fix for a wrong header CV recorded on the Applied table.
+    """
+    clean = cv.strip() if isinstance(cv, str) and cv.strip() else None
+    own = session is None
+    session = session or get_session()
+    try:
+        latest = _latest_row(session, job_id)
+        event = latest.event if latest else None
+        if event not in APPLIED_EVENTS:
+            raise ValueError(
+                f"cannot set a cv on {job_id!r}: its latest event is "
+                f"{event!r}, which is not an applied job")
+        row = _append(session, job_id, event, latest.status, latest.note, clean)
         session.commit()
         return _as_dict(row)
     finally:

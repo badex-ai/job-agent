@@ -11,10 +11,21 @@ import sys
 import threading
 import webbrowser
 
+from shared.database.models import (
+    migrate_applications, migrate_application_columns,
+)
 from v2.webapp.server import HOST, PORT, make_server
 
 
 def main():
+    # Bring the applications schema up to date before serving. The read queries
+    # touch columns (e.g. `cv`) that create_all() never adds to a table that
+    # already exists, so on a DB predating a column the first /api/jobs query
+    # would raise "no such column" and surface as a misleading "server down" in
+    # the UI. Both calls are idempotent no-ops once the schema is current.
+    migrate_applications()
+    migrate_application_columns()
+
     try:
         httpd = make_server(HOST, PORT)
     except OSError as exc:

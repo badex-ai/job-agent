@@ -87,9 +87,15 @@ def server(Session):
         finally:
             s.close()
 
+    # A tiny stub cv-text provider so the /api/cv-text route is exercised without
+    # touching data/: only 'cv_devops' resolves, everything else is None (404).
+    def temp_cv_text(name):
+        return "DevOps CV body" if name == "cv_devops" else None
+
     httpd = make_server(host="127.0.0.1", port=0, jobs_provider=temp_provider,
                         cvs_provider=lambda: ["cv_devops", "cv_frontend"],
-                        applications_provider=temp_apps_provider)
+                        applications_provider=temp_apps_provider,
+                        cv_text_provider=temp_cv_text)
     host, port = httpd.server_address
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -223,6 +229,25 @@ def test_api_cvs_returns_the_picker_list(server):
     assert data == {"cvs": ["cv_devops", "cv_frontend"]}
 
 
+def test_api_cv_text_returns_the_cv_body(server):
+    status, ctype, data = _get_json(server, "/api/cv-text?name=cv_devops")
+    assert status == 200
+    assert "application/json" in ctype
+    assert data == {"name": "cv_devops", "text": "DevOps CV body"}
+
+
+def test_api_cv_text_unknown_name_is_404(server):
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _get(server, "/api/cv-text?name=cv_nope")
+    assert exc.value.code == 404
+
+
+def test_api_cv_text_missing_name_is_404(server):
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _get(server, "/api/cv-text")
+    assert exc.value.code == 404
+
+
 def test_api_applications_empty_is_clean(server):
     status, ctype, data = _get_json(server, "/api/applications")
     assert status == 200
@@ -353,6 +378,49 @@ def test_action_set_status_after_apply(server, Session):
                               {"action": "set_status", "job_id": "s1",
                                "status": "interview"})
     assert status == 200 and data["row"]["status"] == "interview"
+
+
+def test_action_apply_records_the_cv(server, Session):
+    """B2 over HTTP: the cv on the apply payload lands on the row and surfaces in
+    the Applied table."""
+    _seed_decided(Session, "cv1", "APPLY")
+    status, data = _post_json(server, "/api/action",
+                              {"action": "apply", "job_id": "cv1",
+                               "cv": "cv_devops"})
+    assert status == 200 and data["row"]["cv"] == "cv_devops"
+    _, _, apps = _get_json(server, "/api/applications")
+    assert apps["applied"][0]["cv"] == "cv_devops"
+
+
+def test_action_set_cv_corrects_the_recorded_cv(server, Session):
+    _seed_decided(Session, "cv2", "APPLY")
+    _post_json(server, "/api/action",
+               {"action": "apply", "job_id": "cv2", "cv": "cv_devops"})
+    status, data = _post_json(server, "/api/action",
+                              {"action": "set_cv", "job_id": "cv2",
+                               "cv": "cv_fullstack"})
+    assert status == 200 and data["row"]["cv"] == "cv_fullstack"
+    _, _, apps = _get_json(server, "/api/applications")
+    assert apps["applied"][0]["cv"] == "cv_fullstack"
+    assert apps["applied"][0]["status"] == "applied"  # placement/status intact
+
+
+def test_action_set_cv_on_unapplied_job_is_400(server, Session):
+    _seed_decided(Session, "cv3", "CONSIDER")
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _post_json(server, "/api/action",
+                   {"action": "set_cv", "job_id": "cv3", "cv": "cv_devops"})
+    assert exc.value.code == 400
+
+
+def test_action_non_string_cv_is_400(server, Session):
+    """A non-string cv (dict/list) is rejected before it reaches SQLite, like
+    the note guard — a clean 400, not a dropped 500."""
+    _seed_decided(Session, "cv4", "APPLY")
+    with pytest.raises(urllib.error.HTTPError) as exc:
+        _post_json(server, "/api/action",
+                   {"action": "apply", "job_id": "cv4", "cv": {"x": 1}})
+    assert exc.value.code == 400
 
 
 # --- write-guard rejections -------------------------------------------------

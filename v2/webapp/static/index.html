@@ -123,8 +123,25 @@
   .btn.primary:hover { background:color-mix(in srgb,var(--accent) 18%,var(--card)); }
   .btn.copied { color:var(--accent); border-color:color-mix(in srgb,var(--accent) 55%,transparent); }
   .btn svg { width:15px; height:15px; flex:none; }
-  .cvpick { font-size:11.5px; color:var(--ink-faint); text-align:center; margin-top:2px; }
-  .cvpick b { color:var(--ink-soft); font-weight:600; }
+  /* copy-CV-text button beside the header picker: copies the selected CV's raw
+     text for the application forms that take a paste (not a file upload). It is a
+     convenience only — it never records anything (Apply records the CV). */
+  .copycv { display:inline-flex; align-items:center; justify-content:center; font:inherit;
+    color:var(--ink-soft); background:var(--card); border:1px solid var(--line-strong);
+    border-radius:7px; padding:5px 8px; cursor:pointer; }
+  .copycv:hover { color:var(--accent-ink); border-color:var(--ink-faint); }
+  .copycv:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .copycv.copied { color:var(--accent); border-color:color-mix(in srgb,var(--accent) 55%,transparent); }
+  .copycv:disabled { opacity:.5; cursor:default; }
+  .copycv svg { width:14px; height:14px; flex:none; }
+  /* editable CV cell in the Applied table (click-to-edit, mirrors the note cell) */
+  .cv-cell { white-space:nowrap; }
+  .cv-text { cursor:pointer; border-bottom:1px dashed transparent; color:var(--ink-soft); }
+  .trk tr:hover .cv-text { border-bottom-color:var(--line-strong); }
+  .cv-cell.empty-cv .cv-text { color:var(--ink-faint); font-style:italic; }
+  .cv-select { font:inherit; font-size:13px; color:var(--ink); background:var(--card);
+    border:1px solid var(--accent); border-radius:6px; padding:3px 6px; }
+  .cv-select:focus { outline:2px solid var(--accent); outline-offset:1px; }
   /* the lifecycle action row (Apply / Dismiss / Hold) under the primary rail */
   .acts { display:flex; gap:6px; margin-top:4px; padding-top:8px; border-top:1px solid var(--line); }
   .acts .btn { flex:1; padding:7px 8px; font-size:12px; }
@@ -177,6 +194,15 @@
   .restore:hover { border-color:var(--accent); color:var(--accent-ink); }
   .restore:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
 
+  /* transient confirmation (e.g. "Applied — devops") so a wrong header CV is
+     caught at apply-time, not weeks later. */
+  .toast { position:fixed; left:50%; bottom:28px; transform:translateX(-50%) translateY(8px);
+    background:var(--ink); color:var(--ground); font-size:13px; font-weight:600;
+    padding:9px 16px; border-radius:8px; box-shadow:var(--shadow); opacity:0;
+    transition:opacity .18s ease, transform .18s ease; pointer-events:none; z-index:50; }
+  .toast.show { opacity:1; transform:translateX(-50%) translateY(0); }
+  @media (prefers-reduced-motion: reduce){ .toast{ transition:none; } }
+
   @media (max-width:720px){
     .job { grid-template-columns:4px 1fr; }
     .rail { grid-column:2; grid-row:auto; flex-direction:row; margin-top:14px; flex-wrap:wrap; }
@@ -193,6 +219,8 @@
   <div class="cv">
     CV in use:
     <select id="cv" aria-label="CV in use"></select>
+    <button class="copycv" type="button" id="copycv" title="Copy this CV's text"
+      aria-label="Copy CV text"></button>
   </div>
   <button class="themebtn" type="button" id="theme">theme</button>
 </div>
@@ -240,6 +268,7 @@ const STATUSES = ["applied", "interview", "offer", "rejected", "ghosted"];
 const SVG_COPY = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><rect x="9" y="9" width="11" height="11" rx="2"/><path d="M5 15V5a2 2 0 0 1 2-2h10"/></svg>';
 const SVG_OPEN = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M18 13v6a2 2 0 0 1-2 2H5a2 2 0 0 1-2-2V8a2 2 0 0 1 2-2h6"/><path d="M15 3h6v6"/><path d="M10 14 21 3"/></svg>';
 const SVG_CHEV = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5"><path d="m6 9 6 6 6-6"/></svg>';
+const SVG_DOC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2"><path d="M14 2H6a2 2 0 0 0-2 2v16a2 2 0 0 0 2 2h12a2 2 0 0 0 2-2V8z"/><path d="M14 2v6h6"/></svg>';
 
 let state = {
   buckets: {}, counts: {}, cvs: [], cv: null, active: "APPLY",
@@ -305,18 +334,21 @@ async function refresh() {
 
 function renderCvPicker() {
   const sel = $("#cv");
+  const copyBtn = $("#copycv");
+  copyBtn.innerHTML = SVG_DOC;
   sel.replaceChildren();
   if (state.cvs.length === 0) {
     sel.append(el("option", { text: "none found" }));
     sel.disabled = true;
+    copyBtn.disabled = true;
     return;
   }
   for (const cv of state.cvs) sel.append(el("option", { value: cv, text: cv + ".txt" }));
   sel.value = state.cv;
-  sel.addEventListener("change", () => {
-    state.cv = sel.value;
-    renderList(state.active);  // refresh the per-card "CV in use" line
-  });
+  sel.addEventListener("change", () => { state.cv = sel.value; });
+  // Copy the currently-selected CV's text (for paste-based forms). Convenience
+  // only — the recorded CV is captured on Apply, never here.
+  copyBtn.addEventListener("click", () => copyCvText(state.cv, copyBtn));
 }
 
 function renderTabs() {
@@ -437,6 +469,51 @@ function noteCell(note, jobId) {
   return td;
 }
 
+// An editable CV cell for the Applied table. Shows the recorded CV as text;
+// clicking swaps in a <select> of the available CVs (plus a "— none —" option
+// to clear). Change or blur saves (POST set_cv + refresh), Esc cancels. Mirrors
+// noteCell. `jobId` is the applied job whose CV is being corrected.
+function cvCell(cv, jobId) {
+  const td = el("td", { class: "cv-cell" });
+
+  function showText() {
+    td.replaceChildren();
+    td.classList.toggle("empty-cv", !cv);
+    const label = cv ? cv.replace(/^cv_/, "") : "add CV…";
+    td.append(el("span", { class: "cv-text", text: label,
+      title: cv ? "Click to change CV" : "Click to set the CV sent" }));
+    td.querySelector(".cv-text").addEventListener("click", showEdit);
+  }
+
+  function showEdit() {
+    if (state.cvs.length === 0) return;  // nothing to pick from
+    const sel = el("select", { class: "cv-select", "aria-label": "CV sent" });
+    sel.append(el("option", { value: "", text: "— none —" }));
+    for (const c of state.cvs) {
+      sel.append(el("option", { value: c, text: c.replace(/^cv_/, ""),
+        ...(c === cv ? { selected: "" } : {}) }));
+    }
+    td.replaceChildren(sel);
+    sel.focus();
+    let done = false;
+    const save = async () => {
+      if (done) return; done = true;
+      const next = sel.value || null;
+      if (next === (cv || null)) { showText(); return; }  // unchanged: no write
+      const ok = await postAction({ action: "set_cv", job_id: jobId, cv: next });
+      if (!ok) showText();  // on success, refresh() re-renders the table
+    };
+    sel.addEventListener("change", save);
+    sel.addEventListener("blur", save);
+    sel.addEventListener("keydown", (e) => {
+      if (e.key === "Escape") { done = true; showText(); }
+    });
+  }
+
+  showText();
+  return td;
+}
+
 function renderAppliedTable(list) {
   if (state.applied.length === 0) {
     list.replaceChildren(el("p", { class: "empty", text: EMPTY_COPY.APPLIED }));
@@ -447,13 +524,15 @@ function renderAppliedTable(list) {
       jobCell(r),
       el("td", { class: "date", text: r.applied_at || "—" }));
     tr.append(el("td", {}, statusPill(r)));
+    tr.append(cvCell(r.cv, r.id));
     tr.append(noteCell(r.note, r.id));
     return tr;
   });
   const table = el("table", { class: "trk" },
     el("thead", {}, el("tr", {},
       el("th", { text: "Job" }), el("th", { text: "Applied" }),
-      el("th", { text: "Status" }), el("th", { text: "Notes" }))),
+      el("th", { text: "Status" }), el("th", { text: "CV" }),
+      el("th", { text: "Notes" }))),
     el("tbody", {}, ...rows));
   list.replaceChildren(el("div", { class: "tbl-wrap" }, table));
 }
@@ -536,10 +615,12 @@ function jobCard(job, bucket) {
     readmore.setAttribute("aria-expanded", String(open));
   });
 
-  // right rail
+  // right rail. The CV is chosen once in the header ("CV in use"); the copy-
+  // message and Apply both read that single picker (state.cv), so there is no
+  // per-card CV control — only 3 CVs, usually the same one per session.
   const copyBtn = el("button", { class: "btn primary", type: "button", html: SVG_COPY });
   copyBtn.append(document.createTextNode(" Copy message"));
-  copyBtn.addEventListener("click", () => copyMessage(job, copyBtn));
+  copyBtn.addEventListener("click", () => copyMessage(job, state.cv, copyBtn));
 
   const rail = el("div", { class: "rail" }, copyBtn);
   if (job.apply_link) {
@@ -563,8 +644,18 @@ function jobCard(job, bucket) {
   apply.addEventListener("click", async () => {
     if (job.apply_link) window.open(job.apply_link, "_blank", "noopener");
     apply.disabled = true;
-    const ok = await postAction({ action: "apply", job_id: job.id });
-    if (!ok) apply.disabled = false;
+    // Snapshot the header's CV BEFORE the await: the picker can change during the
+    // POST+refresh round-trip, and the recorded value must be the one the toast
+    // names (null when no cv_*.txt on disk). A stale header is fixable afterward
+    // via the editable CV cell in the Applied table.
+    const cv = state.cv;
+    const ok = await postAction({ action: "apply", job_id: job.id, cv });
+    if (!ok) { apply.disabled = false; return; }
+    // Confirm WHICH CV was recorded, so a wrong header is caught now, not weeks
+    // later — and say so explicitly when none was recorded, since a silent
+    // no-CV apply is exactly the case worth noticing. refresh() (inside
+    // postAction) has already moved the card out.
+    toast(cv ? `Applied — ${cv.replace(/^cv_/, "")}` : "Applied — no CV recorded");
   });
   const acts = el("div", { class: "acts" }, apply);
 
@@ -583,12 +674,6 @@ function jobCard(job, bucket) {
     acts.append(hold);
   }
   rail.append(acts);
-
-  // v1: the CV is the user's picked one, not an auto "best CV" (that's the
-  // deferred scoring feature) — so this line reflects the current picker.
-  const cvpick = el("div", { class: "cvpick", html: "CV in use: <b></b>" });
-  cvpick.querySelector("b").textContent = state.cv ? state.cv + ".txt" : "none";
-  rail.append(cvpick);
   card.append(rail);
 
   return card;
@@ -612,8 +697,9 @@ function buildMessage(job, cv) {
     `chance to talk it through.${cvLine}\n\nThanks,`;
 }
 
-async function copyMessage(job, btn) {
-  const text = buildMessage(job, state.cv);
+// Copy `text` to the clipboard, with the execCommand fallback for browsers/
+// contexts where the async clipboard API is unavailable (non-secure origin).
+async function copyToClipboard(text) {
   try {
     await navigator.clipboard.writeText(text);
   } catch {
@@ -623,10 +709,53 @@ async function copyMessage(job, btn) {
     try { document.execCommand("copy"); } catch { /* give up silently */ }
     ta.remove();
   }
+}
+
+// A brief bottom-centre confirmation. One reused node, so rapid applies don't
+// stack toasts. Used to name the recorded CV right after Apply.
+let _toastTimer = null;
+function toast(message) {
+  let node = $("#toast");
+  if (!node) {
+    node = el("div", { class: "toast", id: "toast", role: "status", "aria-live": "polite" });
+    document.body.append(node);
+  }
+  node.textContent = message;
+  requestAnimationFrame(() => node.classList.add("show"));
+  clearTimeout(_toastTimer);
+  _toastTimer = setTimeout(() => node.classList.remove("show"), 2200);
+}
+
+// Flash a "Copied ✓" state on a button for ~1.6s, then restore its children.
+function flashCopied(btn, label = "Copied ✓") {
   const kids = [...btn.childNodes];
-  btn.textContent = "Copied ✓";
+  btn.textContent = label;
   btn.classList.add("copied");
   setTimeout(() => { btn.replaceChildren(...kids); btn.classList.remove("copied"); }, 1600);
+}
+
+async function copyMessage(job, cv, btn) {
+  await copyToClipboard(buildMessage(job, cv));
+  flashCopied(btn);
+}
+
+// Copy the SELECTED CV's raw text (fetched on demand from /api/cv-text) for the
+// application forms that take a paste rather than a file upload. This is a
+// convenience only — it never records anything; the recorded CV is the card's
+// select value, captured on Apply (mark-only).
+async function copyCvText(cv, btn) {
+  if (!cv) { alert("No CV selected to copy."); return; }
+  let text;
+  try {
+    const res = await fetch("/api/cv-text?name=" + encodeURIComponent(cv));
+    if (!res.ok) throw new Error(String(res.status));
+    text = (await res.json()).text || "";
+  } catch {
+    alert("Couldn't load the CV text.");
+    return;
+  }
+  await copyToClipboard(text);
+  flashCopied(btn, "Copied ✓");
 }
 
 $("#theme").addEventListener("click", () => {

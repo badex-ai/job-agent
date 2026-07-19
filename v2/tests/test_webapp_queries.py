@@ -15,7 +15,7 @@ from shared.database.models import Base, Job, migrate_applications
 from v2.webapp import applications
 from v2.webapp.queries import (
     BUCKETS, get_classified_jobs, get_applications, bucket_counts, list_cvs,
-    _tags,
+    cv_text, _tags,
 )
 
 
@@ -231,6 +231,30 @@ def test_applied_job_appears_in_applied_table(Session):
     s.close()
 
 
+def test_applied_row_carries_the_cv(Session):
+    """B2: the CV sent on apply surfaces in the Applied table row."""
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface_priority")
+    applications.apply_to_job("j1", cv="cv_devops", session=s)
+    apps = get_applications(session=s)
+    assert apps["applied"][0]["cv"] == "cv_devops"
+    s.close()
+
+
+def test_applied_row_cv_survives_a_status_change(Session):
+    """The (job, cv, outcome) triple must survive the lifecycle: a status change
+    keeps the recorded CV visible in the table."""
+    s = Session()
+    _seed_job(s, id="j1", gate_verdict="surface")
+    applications.apply_to_job("j1", cv="cv_frontend", session=s)
+    applications.set_status("j1", "interview", session=s)
+    apps = get_applications(session=s)
+    row = apps["applied"][0]
+    assert row["status"] == "interview"
+    assert row["cv"] == "cv_frontend"
+    s.close()
+
+
 def test_applied_row_reflects_latest_status(Session):
     s = Session()
     _seed_job(s, id="j1", gate_verdict="surface")
@@ -422,6 +446,30 @@ def test_list_cvs_ignores_non_cv_and_non_txt(tmp_path):
 
 def test_list_cvs_missing_dir_is_empty(tmp_path):
     assert list_cvs(tmp_path / "nope") == []
+
+
+# --- cv_text: raw CV contents for the copy-CV-text button -------------------
+
+def test_cv_text_returns_the_file_contents(tmp_path):
+    (tmp_path / "cv_devops.txt").write_text("DevOps CV body", encoding="utf-8")
+    assert cv_text("cv_devops", tmp_path) == "DevOps CV body"
+
+
+def test_cv_text_unknown_name_is_none(tmp_path):
+    (tmp_path / "cv_devops.txt").write_text("x")
+    assert cv_text("cv_nope", tmp_path) is None
+
+
+def test_cv_text_rejects_path_traversal(tmp_path):
+    """A traversal / absolute name must never escape the data dir: it isn't in
+    list_cvs(), so it resolves to None rather than reading an arbitrary file."""
+    (tmp_path / "cv_devops.txt").write_text("x")
+    (tmp_path.parent / "secret.txt").write_text("SECRET")
+    assert cv_text("../secret", tmp_path) is None
+    assert cv_text("/etc/passwd", tmp_path) is None
+    # a bare 'cv' (no underscore) is not a picker CV either.
+    (tmp_path / "cv.txt").write_text("y")
+    assert cv_text("cv", tmp_path) is None
 
 
 # --- pure helpers ----------------------------------------------------------

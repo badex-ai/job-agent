@@ -160,6 +160,7 @@ def _application_row(job: Optional[Job], state) -> dict:
         "apply_link": (job.apply_link or job.job_url) if job else None,
         "status": state.status,   # current lifecycle status (Applied table)
         "note": state.note,
+        "cv": state.cv,           # which CV was sent (editable in the Applied table)
         # applied_at lives on the Job row (mark_applied set it in the dual-write),
         # not on the Application log; expose it as an ISO date for the Date column.
         "applied_at": (job.applied_at.date().isoformat()
@@ -220,3 +221,23 @@ def list_cvs(data_dir: Path = _DATA_DIR) -> List[str]:
     if not data_dir.is_dir():
         return []
     return sorted(p.stem for p in data_dir.glob("cv_*.txt"))
+
+
+def cv_text(name: str, data_dir: Path = _DATA_DIR) -> Optional[str]:
+    """The raw text of the CV file `<name>.txt`, or None if it isn't a known CV.
+
+    `name` is validated against list_cvs() — an exact-stem membership check — so
+    a caller-supplied string can never escape the data dir (no '..', no absolute
+    path, no arbitrary file): only a real cv_*.txt stem resolves. Returns the
+    file's decoded text; None when the name is unknown or the file is unreadable.
+    """
+    if name not in list_cvs(data_dir):
+        return None
+    try:
+        return (data_dir / f"{name}.txt").read_text(encoding="utf-8")
+    except (OSError, UnicodeDecodeError):
+        # OSError: gone/unreadable since the list_cvs() check (TOCTOU).
+        # UnicodeDecodeError: a non-UTF-8 CV file — a 404 is truer than letting
+        # it escape as an unhandled 500, and matches the "unreadable -> None"
+        # contract above.
+        return None
