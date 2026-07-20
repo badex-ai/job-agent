@@ -23,7 +23,7 @@ from sqlalchemy.orm import sessionmaker
 from shared.database import models
 from shared.database.models import Application, Base, Job, migrate_applications
 from v2.webapp import applications
-from v2.webapp.queries import get_classified_jobs, get_applications
+from v2.webapp.queries import get_classified_jobs, get_applications, gate_health
 from v2.webapp.server import make_server
 
 
@@ -92,10 +92,18 @@ def server(Session):
     def temp_cv_text(name):
         return "DevOps CV body" if name == "cv_devops" else None
 
+    def temp_gate_health():
+        s = Session()
+        try:
+            return gate_health(session=s)
+        finally:
+            s.close()
+
     httpd = make_server(host="127.0.0.1", port=0, jobs_provider=temp_provider,
                         cvs_provider=lambda: ["cv_devops", "cv_frontend"],
                         applications_provider=temp_apps_provider,
-                        cv_text_provider=temp_cv_text)
+                        cv_text_provider=temp_cv_text,
+                        gate_health_provider=temp_gate_health)
     host, port = httpd.server_address
     thread = threading.Thread(target=httpd.serve_forever, daemon=True)
     thread.start()
@@ -326,6 +334,33 @@ def test_health(server):
     status, _, data = _get_json(server, "/api/health")
     assert status == 200
     assert data == {"status": "ok"}
+
+
+def test_api_gate_health_reports_pending_backlog(server, Session):
+    """The staleness endpoint counts ungated rows (the backlog the buckets hide)
+    and reports them over HTTP, reading the temp DB via the injected provider."""
+    _seed_decided(Session, "gated", "CONSIDER")   # has a verdict + fresh run
+    s = Session()
+    s.add(Job(id="ungated", title="Role ungated", company="Acme",
+              location="Remote", description="x", status="new",
+              gate_verdict=None, gate_run_at=None))
+    s.commit()
+    s.close()
+
+    status, ctype, data = _get_json(server, "/api/gate-health")
+    assert status == 200
+    assert "application/json" in ctype
+    assert data["pending"] == 1
+    assert data["total"] == 2
+    assert data["stale"] is False        # the gated row ran just now
+    assert data["last_gate_at"] is not None
+
+
+def test_api_gate_health_empty_db_is_stale(server):
+    """No jobs, nothing ever gated -> stale True (the 'no signal is stale' case)."""
+    status, _, data = _get_json(server, "/api/gate-health")
+    assert status == 200
+    assert data == {"pending": 0, "total": 0, "last_gate_at": None, "stale": True}
 
 
 def test_unknown_path_404(server):

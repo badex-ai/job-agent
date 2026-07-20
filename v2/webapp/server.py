@@ -35,6 +35,7 @@ from urllib.parse import parse_qs, urlsplit
 from v2.webapp import applications
 from v2.webapp.queries import (
     get_classified_jobs, get_applications, bucket_counts, list_cvs, cv_text,
+    gate_health,
 )
 
 # The page lives next to this module. It may not exist yet (wired in build step
@@ -132,7 +133,8 @@ def dispatch_action(body: dict) -> dict:
 
 def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs,
                  applications_provider=get_applications,
-                 cv_text_provider=cv_text):
+                 cv_text_provider=cv_text,
+                 gate_health_provider=gate_health):
     """Build the request-handler class, closing over the read providers.
 
     `jobs_provider` is injectable so tests can point the server at a temp DB
@@ -140,8 +142,9 @@ def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs,
     `get_classified_jobs`: {bucket: [job_view, ...]}. `cvs_provider` is the
     same seam for the CV picker list, `applications_provider` for the
     Applied/Dismissed tracking tables ({"applied": [...], "dismissed": [...]}),
-    and `cv_text_provider(name) -> str|None` serves one CV's raw text for the
-    copy-CV-text button.
+    `cv_text_provider(name) -> str|None` serves one CV's raw text for the
+    copy-CV-text button, and `gate_health_provider() -> dict` reports pipeline
+    liveness (pending backlog + last gate run) for the staleness banner.
     """
 
     class Handler(BaseHTTPRequestHandler):
@@ -172,6 +175,8 @@ def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs,
                     self._serve_json({"cvs": cvs_provider()})
                 elif path == "/api/cv-text":
                     self._serve_cv_text()
+                elif path == "/api/gate-health":
+                    self._serve_json(gate_health_provider())
                 elif path == "/api/health":
                     self._serve_json({"status": "ok"})
                 elif path == "/favicon.ico":
@@ -301,7 +306,7 @@ def make_handler(jobs_provider=get_classified_jobs, cvs_provider=list_cvs,
 
 def make_server(host=HOST, port=PORT, jobs_provider=get_classified_jobs,
                 cvs_provider=list_cvs, applications_provider=get_applications,
-                cv_text_provider=cv_text):
+                cv_text_provider=cv_text, gate_health_provider=gate_health):
     """Create (but do not start) the HTTP server bound to host:port.
 
     Threading so a slow browser fetch never blocks the next request; single
@@ -311,7 +316,7 @@ def make_server(host=HOST, port=PORT, jobs_provider=get_classified_jobs,
     return ThreadingHTTPServer(
         (host, port),
         make_handler(jobs_provider, cvs_provider, applications_provider,
-                     cv_text_provider))
+                     cv_text_provider, gate_health_provider))
 
 
 def serve(host=HOST, port=PORT):

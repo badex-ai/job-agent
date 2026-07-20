@@ -15,7 +15,7 @@ from shared.database.models import Base, Job, migrate_applications
 from v2.webapp import applications
 from v2.webapp.queries import (
     BUCKETS, get_classified_jobs, get_applications, bucket_counts, list_cvs,
-    cv_text, _tags,
+    cv_text, gate_health, _tags,
 )
 
 
@@ -470,6 +470,68 @@ def test_cv_text_rejects_path_traversal(tmp_path):
     # a bare 'cv' (no underscore) is not a picker CV either.
     (tmp_path / "cv.txt").write_text("y")
     assert cv_text("cv", tmp_path) is None
+
+
+# --- gate health (staleness banner) ----------------------------------------
+
+def test_gate_health_empty_db_is_stale(Session):
+    """No jobs at all: nothing pending, never gated, stale (no signal is stale)."""
+    s = Session()
+    h = gate_health(session=s)
+    assert h == {"pending": 0, "total": 0, "last_gate_at": None, "stale": True}
+    s.close()
+
+
+def test_gate_health_counts_ungated_backlog(Session):
+    """Ungated (gate_verdict NULL) rows are the pending backlog the buckets hide."""
+    s = Session()
+    _seed_job(s, id="gated", gate_verdict="surface")
+    _seed_job(s, id="null-1", gate_verdict=None, gate_run_at=None)
+    _seed_job(s, id="null-2", gate_verdict=None, gate_run_at=None)
+
+    h = gate_health(session=s)
+    assert h["pending"] == 2
+    assert h["total"] == 3
+    assert h["stale"] is False          # the one gated row is fresh (utcnow)
+    s.close()
+
+
+def test_gate_health_excludes_applied_from_pending(Session):
+    """A CLI-applied job (Job.applied set, never gated) is out of the worklist,
+    so it must not inflate the 'awaiting gate' count."""
+    s = Session()
+    _seed_job(s, id="applied-ungated", gate_verdict=None, gate_run_at=None,
+              applied=True)
+    _seed_job(s, id="real-pending", gate_verdict=None, gate_run_at=None)
+
+    h = gate_health(session=s)
+    assert h["pending"] == 1            # only the genuinely-waiting row
+    s.close()
+
+
+def test_gate_health_stale_when_last_run_old(Session):
+    """A last gate run older than the threshold marks the pipeline stale even
+    with nothing pending — the gate has stopped keeping up."""
+    s = Session()
+    old = datetime.utcnow() - timedelta(hours=48)
+    _seed_job(s, id="old-gated", gate_verdict="surface", gate_run_at=old)
+
+    h = gate_health(session=s)
+    assert h["pending"] == 0
+    assert h["last_gate_at"] == old.isoformat()
+    assert h["stale"] is True
+    s.close()
+
+
+def test_gate_health_fresh_run_not_stale(Session):
+    """A recent gate run within the threshold is not stale."""
+    s = Session()
+    recent = datetime.utcnow() - timedelta(hours=1)
+    _seed_job(s, id="fresh", gate_verdict="surface", gate_run_at=recent)
+
+    h = gate_health(session=s, stale_after=timedelta(hours=24))
+    assert h["stale"] is False
+    s.close()
 
 
 # --- pure helpers ----------------------------------------------------------

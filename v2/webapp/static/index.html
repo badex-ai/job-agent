@@ -67,6 +67,16 @@
   /* the browse | tracking seam: a thin rule between the four gate buckets and
      the two lifecycle tabs, so "jobs to triage" reads apart from "what I did". */
   .tabgap { align-self:stretch; width:1px; background:var(--line-strong); margin:6px 10px 0; flex:none; }
+  /* Gate-staleness banner: the browse buckets hide ungated jobs, so a dead gate
+     leaves the page looking quiet. This surfaces the hidden backlog. Terracotta
+     (the skip/warn hue) so it reads as "attention", not the teal accent. */
+  .gatewarn { max-width:1080px; margin:14px auto 0; padding:9px 14px;
+    background:color-mix(in srgb,var(--skip) 12%,var(--card));
+    border:1px solid color-mix(in srgb,var(--skip) 40%,var(--line));
+    border-radius:8px; color:var(--ink); font-size:13px; line-height:1.4;
+    display:flex; align-items:baseline; gap:8px; }
+  .gatewarn::before { content:"\26A0"; color:var(--skip); font-size:14px; }
+  .gatewarn .when { color:var(--ink-soft); }
 
   /* list */
   .list { max-width:1080px; margin:0 auto; padding:22px 28px 60px;
@@ -225,6 +235,8 @@
   <button class="themebtn" type="button" id="theme">theme</button>
 </div>
 
+<div class="gatewarn" id="gatewarn" role="status" hidden></div>
+
 <div class="tabs" id="tabs" role="tablist" aria-label="Buckets"></div>
 
 <div class="list" id="list" role="tabpanel">
@@ -272,7 +284,7 @@ const SVG_DOC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stro
 
 let state = {
   buckets: {}, counts: {}, cvs: [], cv: null, active: "APPLY",
-  applied: [], dismissed: [],
+  applied: [], dismissed: [], gate: null,
 };
 
 const $ = (sel, root = document) => root.querySelector(sel);
@@ -292,8 +304,8 @@ function el(tag, attrs = {}, ...kids) {
 // first load and by refresh() after a write; does NOT touch the CV picker or
 // the active tab, so a mid-session refresh is seamless.
 async function fetchData() {
-  const [jobsRes, appsRes] = await Promise.all([
-    fetch("/api/jobs"), fetch("/api/applications"),
+  const [jobsRes, appsRes, gateRes] = await Promise.all([
+    fetch("/api/jobs"), fetch("/api/applications"), fetch("/api/gate-health"),
   ]);
   if (!jobsRes.ok) throw new Error("jobs " + jobsRes.status);
   const jobs = await jobsRes.json();
@@ -306,6 +318,42 @@ async function fetchData() {
   state.dismissed = apps.dismissed || [];
   state.counts.APPLIED = state.applied.length;
   state.counts.DISMISSED = state.dismissed.length;
+  // /api/gate-health is best-effort too: a broken health check must never blank
+  // the page. null => the banner stays hidden (renderGateWarn no-ops).
+  state.gate = gateRes.ok ? await gateRes.json() : null;
+}
+
+// "how long ago" in coarse, humane units — the banner wants "3 hours ago", not
+// a timestamp. Input is the ISO string /api/gate-health returns (UTC).
+function agoText(iso) {
+  const then = Date.parse(iso);
+  if (Number.isNaN(then)) return "some time ago";
+  const mins = Math.max(0, Math.round((Date.now() - then) / 60000));
+  if (mins < 1) return "just now";
+  if (mins < 60) return mins + (mins === 1 ? " minute ago" : " minutes ago");
+  const hrs = Math.round(mins / 60);
+  if (hrs < 24) return hrs + (hrs === 1 ? " hour ago" : " hours ago");
+  const days = Math.round(hrs / 24);
+  return days + (days === 1 ? " day ago" : " days ago");
+}
+
+// Show the banner when the gate is behind: any job awaiting a verdict, OR the
+// gate hasn't run inside the staleness window (server decides `stale`). A quiet,
+// caught-up gate renders nothing. The pending count is the point — those jobs
+// are invisible in the buckets, so this is the only place they're reported.
+function renderGateWarn() {
+  const box = $("#gatewarn");
+  const g = state.gate;
+  if (!g || (!g.stale && g.pending === 0)) { box.hidden = true; return; }
+  const when = g.last_gate_at
+    ? el("span", { class: "when", text: "last gate run " + agoText(g.last_gate_at) })
+    : el("span", { class: "when", text: "nothing has been gated yet" });
+  const n = g.pending;
+  const head = n > 0
+    ? `${n} ${n === 1 ? "job is" : "jobs are"} awaiting the gate`
+    : "the gate hasn't run recently";
+  box.replaceChildren(el("span", { text: head + " — " }), when);
+  box.hidden = false;
 }
 
 async function load() {
@@ -315,6 +363,7 @@ async function load() {
     state.cvs = cvsRes.ok ? (await cvsRes.json()).cvs : [];
     state.cv = state.cvs[0] || null;
     renderCvPicker();
+    renderGateWarn();
     renderTabs();
     state.active = TABS.find((b) => (state.counts[b] || 0) > 0) || "APPLY";
     selectTab(state.active);
@@ -328,6 +377,7 @@ async function load() {
 // acted-on job leaves its bucket and the tab numbers stay truthful.
 async function refresh() {
   await fetchData();
+  renderGateWarn();
   renderTabs();
   selectTab(state.active);
 }

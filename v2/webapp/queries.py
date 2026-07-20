@@ -26,8 +26,11 @@ never writes. The dicts are JSON-serialisable so the server can inject them
 straight into the page.
 """
 import json
+from datetime import datetime, timedelta
 from pathlib import Path
 from typing import Dict, List, Optional
+
+from sqlalchemy import func
 
 from shared.database.models import Job, get_session
 from v2.webapp import applications
@@ -146,6 +149,52 @@ def get_classified_jobs(session=None) -> Dict[str, List[dict]]:
 def bucket_counts(classified: Dict[str, List[dict]]) -> Dict[str, int]:
     """Live per-bucket counts for the tab labels."""
     return {b: len(classified.get(b, [])) for b in BUCKETS}
+
+
+# A gate run older than this (or none at all) marks the pipeline stale. The
+# loop is scheduled hourly (shared.config.SCRAPE_INTERVAL_MINUTES), so 24h means
+# ~24 cycles have failed to gate anything — a genuine stall, not one slow batch.
+STALE_AFTER = timedelta(hours=24)
+
+
+def gate_health(session=None, *, now: Optional[datetime] = None,
+                stale_after: timedelta = STALE_AFTER) -> dict:
+    """Pipeline liveness for the header banner: how many jobs await the gate,
+    and when it last ran. Read-only, one small aggregate query.
+
+    The webapp filters gate_verdict-NULL (ungated) rows out of every bucket, so
+    a backlog of ungated jobs is otherwise INVISIBLE — the page looks quiet when
+    the gate is dead (e.g. M4 unreachable, 956/986 rows NULL). This surfaces it.
+
+    `pending` counts jobs the gate still owes a verdict, EXCLUDING ones already
+    applied to (a CLI-applied job sets Job.applied but never gets gated; it is
+    out of the worklist, not "waiting"). `last_gate_at` is the freshest
+    gate_run_at across all rows (None if nothing has ever been gated). `stale`
+    is True when nothing has been gated, or the last run is older than
+    `stale_after`. `now`/`stale_after` are injectable for deterministic tests.
+    """
+    own_session = session is None
+    session = session or get_session()
+    try:
+        now = now or datetime.utcnow()
+        pending = (
+            session.query(func.count(Job.id))
+            .filter(Job.gate_verdict.is_(None))
+            .filter((Job.applied.is_(None)) | (Job.applied.is_(False)))
+            .scalar()
+        ) or 0
+        total = session.query(func.count(Job.id)).scalar() or 0
+        last = session.query(func.max(Job.gate_run_at)).scalar()
+        stale = last is None or (now - last) > stale_after
+        return {
+            "pending": pending,
+            "total": total,
+            "last_gate_at": last.isoformat() if last else None,
+            "stale": stale,
+        }
+    finally:
+        if own_session:
+            session.close()
 
 
 def _application_row(job: Optional[Job], state) -> dict:
