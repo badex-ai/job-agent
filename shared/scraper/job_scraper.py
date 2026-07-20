@@ -6,6 +6,7 @@ LinkedIn guest endpoint is the same one Google's crawler uses —
 publicly accessible, no authentication, no account risk.
 """
 import logging
+import random
 import time
 import json
 import urllib.parse
@@ -29,6 +30,75 @@ HEADERS = {
     ),
     "Accept-Language": "en-US,en;q=0.9",
 }
+
+# Rate-limit backoff for the two LinkedIn `requests` paths. A single 429 used to
+# abandon a whole page (search) or store a blank description (per-job fetch),
+# and the gate reads the description, so a throttled fetch silently poisoned the
+# data — this is the 1035/1975-blank incident recorded in commit a5d84f7. Retry
+# with exponential backoff + jitter instead of giving up on the first 429.
+RETRY_BASE_DELAY = 2.0   # seconds; grows 2s, 4s, 8s across attempts
+RETRY_MAX_DELAY = 60.0   # cap a single backoff sleep
+
+
+def _linkedin_get(url: str, *, params: Dict = None, timeout: float,
+                  max_retries: int = 3) -> requests.Response:
+    """GET a LinkedIn guest endpoint, backing off on 429s.
+
+    On HTTP 429 (or a transient connection error) it sleeps with exponential
+    backoff and jitter, honouring a `Retry-After` header when present, up to
+    `max_retries` extra attempts. A 429 that survives the budget is raised as an
+    HTTPError so the caller's existing `except` logs it and returns [] — same
+    contract as before, just after we have genuinely tried rather than folding on
+    the first throttle. Non-429 HTTP errors are not retried (they will not fix
+    themselves); they raise immediately via raise_for_status().
+    """
+    last_exc = None
+    for attempt in range(max_retries + 1):
+        try:
+            resp = requests.get(url, params=params, headers=HEADERS,
+                                timeout=timeout)
+        except requests.exceptions.RequestException as exc:
+            # Connection reset / read timeout: treat like a soft throttle and
+            # retry, since LinkedIn drops connections under load rather than 429.
+            last_exc = exc
+            if attempt == max_retries:
+                raise
+        else:
+            if resp.status_code != 429:
+                resp.raise_for_status()
+                return resp
+            last_exc = requests.exceptions.HTTPError(
+                "429 Too Many Requests", response=resp)
+            if attempt == max_retries:
+                raise last_exc
+
+        delay = min(RETRY_BASE_DELAY * (2 ** attempt), RETRY_MAX_DELAY)
+        retry_after = _retry_after_seconds(last_exc)
+        if retry_after is not None:
+            delay = min(retry_after, RETRY_MAX_DELAY)
+        delay += random.uniform(0, delay * 0.25)  # jitter, de-synchronise calls
+        logger.warning(
+            "LinkedIn throttled (%s) — backing off %.1fs (attempt %d/%d)",
+            getattr(last_exc, "args", [""])[0] if last_exc else "conn",
+            delay, attempt + 1, max_retries,
+        )
+        time.sleep(delay)
+    # Unreachable: the final attempt always returns or raises above.
+    raise last_exc  # pragma: no cover
+
+
+def _retry_after_seconds(exc) -> float:
+    """Parse a Retry-After header (delay-seconds form) off a 429 response, if any."""
+    resp = getattr(exc, "response", None)
+    if resp is None:
+        return None
+    raw = resp.headers.get("Retry-After")
+    if not raw:
+        return None
+    try:
+        return float(raw)
+    except (TypeError, ValueError):
+        return None  # HTTP-date form is not worth parsing for a guest endpoint
 
 
 def _parse_job_card(card) -> Dict:
@@ -72,8 +142,7 @@ def fetch_job_description(job_url: str) -> tuple[str, str]:
         detail_url = (
             f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
         )
-        resp = requests.get(detail_url, headers=HEADERS, timeout=10)
-        resp.raise_for_status()
+        resp = _linkedin_get(detail_url, timeout=10)
         soup = BeautifulSoup(resp.text, "html.parser")
 
         desc_el = soup.find("div", class_="description__text")
@@ -99,18 +168,11 @@ def scrape_linkedin(keyword: str, start: int = 0) -> List[Dict]:
         **LINKEDIN_FILTERS,
     }
     try:
-        resp = requests.get(
+        resp = _linkedin_get(
             LINKEDIN_GUEST_API,
             params=params,
-            headers=HEADERS,
             timeout=15,
         )
-        if resp.status_code == 429:
-            logger.warning("LinkedIn rate limit hit — sleeping 60s")
-            time.sleep(60)
-            return []
-        resp.raise_for_status()
-
         soup = BeautifulSoup(resp.text, "html.parser")
         cards = soup.find_all("div", class_="base-card")
 
@@ -118,8 +180,9 @@ def scrape_linkedin(keyword: str, start: int = 0) -> List[Dict]:
         for card in cards:
             job = _parse_job_card(card)
             if job and job.get("id"):
-                # Fetch full description with a small delay to avoid 429
-                time.sleep(1.5)
+                # Space per-job description fetches to stay under the throttle;
+                # jitter de-synchronises the cadence so it is less fingerprintable.
+                time.sleep(1.5 + random.uniform(0, 0.5))
                 desc, apply = fetch_job_description(job["job_url"])
                 job["description"] = desc
                 job["apply_link"] = apply
