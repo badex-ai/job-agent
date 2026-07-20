@@ -139,3 +139,41 @@ def test_fetch_description_raises_when_fetch_fails():
         with pytest.raises(job_scraper.DescriptionFetchError):
             job_scraper.fetch_job_description(
                 "https://www.linkedin.com/jobs/view/some-role-at-acme-123")
+
+
+def _http_error(status):
+    # An HTTPError shaped like the one requests' raise_for_status() emits:
+    # message + a .response carrying the status code.
+    r = mock.Mock(spec=requests.Response)
+    r.status_code = status
+    return requests.exceptions.HTTPError(f"{status} error", response=r)
+
+
+@pytest.mark.parametrize("status", [404, 410])
+def test_fetch_description_gone_posting_returns_blank_not_raise(status):
+    # A 404/410 means the posting is permanently gone, not that the fetch is
+    # failing. It must be treated like an empty posting (return "", skip fast),
+    # NOT raised as DescriptionFetchError — otherwise a batch of expired rows
+    # sits in the 120s retry backoff. This is the behaviour the first live
+    # repair run exposed on row 1 (a 404 posting).
+    with mock.patch.object(job_scraper, "_linkedin_get",
+                           side_effect=_http_error(status)):
+        desc, apply_link = job_scraper.fetch_job_description(
+            "https://www.linkedin.com/jobs/view/expired-role-at-acme-999")
+    assert (desc, apply_link) == ("", "")
+
+
+def test_fetch_description_transient_http_error_still_raises():
+    # A 429/503 carries a response too, but it is transient — it must still raise
+    # so the caller backs off, unlike the permanent 404/410 above.
+    with mock.patch.object(job_scraper, "_linkedin_get",
+                           side_effect=_http_error(429)):
+        with pytest.raises(job_scraper.DescriptionFetchError):
+            job_scraper.fetch_job_description(
+                "https://www.linkedin.com/jobs/view/throttled-role-at-acme-1")
+
+
+def test_http_status_extracts_or_none():
+    assert job_scraper._http_status(_http_error(404)) == 404
+    assert job_scraper._http_status(requests.exceptions.ConnectionError("x")) is None
+    assert job_scraper._http_status(ValueError("no response")) is None

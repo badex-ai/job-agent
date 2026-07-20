@@ -133,6 +133,21 @@ def test_repair_backs_off_hard_on_fetch_failure(Session, monkeypatch, _mock_time
     s.close()
 
 
+def test_repair_skips_gone_posting_without_backing_off(Session, monkeypatch, _mock_time):
+    # A 404 posting surfaces as ("", "") from fetch_job_description (not a raise),
+    # so it lands in the fast "gone" branch — flat sleep, no 120s backoff. This is
+    # the fix for the first live run, where every expired row would otherwise have
+    # cost a 120s backoff.
+    s = _run_repair(Session, monkeypatch, fetch=lambda url: ("", ""))
+    _job(s, "expired", description="")
+
+    repair_descriptions.repair()
+
+    assert s.query(Job).filter_by(id="expired").one().description == ""
+    assert repair_descriptions.BACKOFF_S not in _mock_time     # skipped fast
+    s.close()
+
+
 def test_repair_dry_run_changes_nothing(Session, monkeypatch, _mock_time):
     calls = []
     s = _run_repair(Session, monkeypatch,

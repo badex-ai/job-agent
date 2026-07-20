@@ -98,6 +98,15 @@ def _linkedin_get(url: str, *, params: Dict = None, timeout: float,
     raise last_exc  # pragma: no cover
 
 
+def _http_status(exc) -> int:
+    """The HTTP status carried by an exception's response, or None if it has none.
+
+    Lets a caller tell a permanent 404/410 (posting gone) from a transient 429
+    or a bare connection error (no response at all)."""
+    resp = getattr(exc, "response", None)
+    return getattr(resp, "status_code", None) if resp is not None else None
+
+
 def _retry_after_seconds(exc) -> float:
     """Parse a Retry-After header (delay-seconds form) off a 429 response, if any."""
     resp = getattr(exc, "response", None)
@@ -155,9 +164,16 @@ def fetch_job_description(job_url: str) -> tuple[str, str]:
         )
         resp = _linkedin_get(detail_url, timeout=10)
     except Exception as e:
-        # Could not read the page (throttle survived retries, network, bad URL).
-        # Raise rather than return a blank the caller cannot tell from an empty
-        # posting — a throttled fetch must be retryable, not silently stored.
+        # A 404/410 means the posting is GONE, not that the fetch is failing —
+        # permanent, and no backoff will bring it back. Treat it like an empty
+        # posting (return blank, skip fast) so a batch of expired rows does not
+        # sit in the retry backoff. Everything else (throttle survived retries,
+        # network, bad URL) is a real fetch failure the caller should back off on
+        # and retry later, so it raises rather than storing an indistinguishable
+        # blank.
+        if _http_status(e) in (404, 410):
+            logger.info(f"Job posting gone ({_http_status(e)}) for {job_url}")
+            return "", ""
         logger.warning(f"Failed to fetch job description for {job_url}: {e}")
         raise DescriptionFetchError(str(e)) from e
 

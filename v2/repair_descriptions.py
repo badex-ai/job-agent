@@ -71,13 +71,15 @@ def repair(limit=None, dry_run=False, sleep_s=SLEEP_S):
                 fixed += 1
                 status = f"OK {len(desc)} chars"
             else:
-                # Fetched fine, but the posting has no usable body — closed, or
-                # a stub too thin for the gate to judge. Leave the row untouched:
-                # an empty description is honest; a placeholder would be read by
-                # the gate as if it were the job's text. (A throttle no longer
-                # lands here — it raises DescriptionFetchError and backs off.)
+                # No usable body: the posting is gone (404/410, the common case
+                # for weeks-old rows), or a stub too thin for the gate. Leave the
+                # row untouched — an empty description is honest; a placeholder
+                # would be read by the gate as if it were the job's text. A
+                # throttle does NOT land here: it raises DescriptionFetchError and
+                # backs off, so expired postings are skipped fast while a real
+                # throttle still pauses the batch.
                 gone += 1
-                status = "still empty (closed or too thin)"
+                status = "still empty (gone or too thin)"
 
             print(f"  [{i}/{total}] {(job.title or '')[:38]:<38} {status}")
             time.sleep(sleep_s)
