@@ -25,7 +25,10 @@ import sys
 import time
 
 from shared.database.models import Job, get_session
-from shared.scraper.job_scraper import fetch_job_description
+from shared.scraper.job_scraper import (
+    DescriptionFetchError,
+    fetch_job_description,
+)
 
 SLEEP_S = 2.5          # between fetches; the throttle is what caused this mess
 BACKOFF_S = 120.0      # on a suspected 429
@@ -54,10 +57,10 @@ def repair(limit=None, dry_run=False, sleep_s=SLEEP_S):
         for i, job in enumerate(jobs, 1):
             try:
                 desc, apply_link = fetch_job_description(job.job_url)
-            except Exception as e:                      # never lose the batch
+            except DescriptionFetchError as e:          # throttle/network — back off
                 failed += 1
                 print(f"  [{i}/{total}] {(job.title or '')[:38]:<38} ERROR {e}")
-                time.sleep(BACKOFF_S)
+                time.sleep(BACKOFF_S)                    # the whole reason this is slow
                 continue
 
             if len(desc.strip()) >= MIN_DESC_CHARS:
@@ -68,11 +71,13 @@ def repair(limit=None, dry_run=False, sleep_s=SLEEP_S):
                 fixed += 1
                 status = f"OK {len(desc)} chars"
             else:
-                # Closed posting, or throttled again. Leave the row untouched —
+                # Fetched fine, but the posting has no usable body — closed, or
+                # a stub too thin for the gate to judge. Leave the row untouched:
                 # an empty description is honest; a placeholder would be read by
-                # the gate as if it were the job's text.
+                # the gate as if it were the job's text. (A throttle no longer
+                # lands here — it raises DescriptionFetchError and backs off.)
                 gone += 1
-                status = "still empty (closed or throttled)"
+                status = "still empty (closed or too thin)"
 
             print(f"  [{i}/{total}] {(job.title or '')[:38]:<38} {status}")
             time.sleep(sleep_s)

@@ -95,3 +95,47 @@ def test_retry_after_parses_only_numeric():
     assert job_scraper._retry_after_seconds(exc_bad) is None
 
     assert job_scraper._retry_after_seconds(ValueError("no response")) is None
+
+
+# --- fetch_job_description: fetch-failure vs empty-but-successful ---------------
+# The contract the guard fix pins: a fetch that could not read the page RAISES
+# DescriptionFetchError (so the caller can back off / recover later), while a
+# fetch that succeeded but found no description div returns "" (an honest empty
+# posting). Conflating the two is what stored throttled fetches as silent blanks.
+
+_DETAIL_WITH_DESC = (
+    '<div class="description__text">We build platform infra in Python and '
+    'TypeScript. Kubernetes a plus. This body is comfortably over a hundred '
+    'characters so the repair gate would accept it.</div>'
+    '<a class="apply-button" href="https://apply.example/1">Apply</a>'
+)
+
+
+def test_fetch_description_returns_text_on_success():
+    with mock.patch.object(job_scraper, "_linkedin_get",
+                           return_value=_resp(200, text=_DETAIL_WITH_DESC)):
+        desc, apply_link = job_scraper.fetch_job_description(
+            "https://www.linkedin.com/jobs/view/some-role-at-acme-123")
+    assert "platform infra" in desc
+    assert apply_link == "https://apply.example/1"
+
+
+def test_fetch_description_empty_posting_returns_blank_not_raise():
+    # 200 OK, but no description__text div -> a real empty posting, not a failure.
+    with mock.patch.object(job_scraper, "_linkedin_get",
+                           return_value=_resp(200, text="<div>no body here</div>")):
+        desc, apply_link = job_scraper.fetch_job_description(
+            "https://www.linkedin.com/jobs/view/some-role-at-acme-123")
+    assert desc == ""
+    assert apply_link == ""
+
+
+def test_fetch_description_raises_when_fetch_fails():
+    # A throttle that survived the retry budget: _linkedin_get raises HTTPError.
+    # fetch_job_description must surface it as DescriptionFetchError, NOT swallow
+    # it into a blank the caller cannot distinguish from an empty posting.
+    boom = requests.exceptions.HTTPError("429 Too Many Requests")
+    with mock.patch.object(job_scraper, "_linkedin_get", side_effect=boom):
+        with pytest.raises(job_scraper.DescriptionFetchError):
+            job_scraper.fetch_job_description(
+                "https://www.linkedin.com/jobs/view/some-role-at-acme-123")

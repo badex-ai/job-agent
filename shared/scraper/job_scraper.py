@@ -37,7 +37,18 @@ HEADERS = {
 # data — this is the 1035/1975-blank incident recorded in commit a5d84f7. Retry
 # with exponential backoff + jitter instead of giving up on the first 429.
 RETRY_BASE_DELAY = 2.0   # seconds; grows 2s, 4s, 8s across attempts
-RETRY_MAX_DELAY = 60.0   # cap a single backoff sleep
+RETRY_MAX_DELAY = 60.0   # cap a single backoff sleep, before jitter (~1.25x)
+
+
+class DescriptionFetchError(Exception):
+    """A job-detail fetch failed (throttle survived retries, network, parse).
+
+    Distinct from a fetch that SUCCEEDED but found no description div — that
+    returns an empty string, an honest "this posting has no body". This is
+    raised only when we could not read the page at all, so a caller can tell a
+    transient failure (back off, retry later) from a genuinely empty posting
+    (leave it be). Without this split a throttled fetch and an empty posting
+    were indistinguishable, both silently stored as blank."""
 
 
 def _linkedin_get(url: str, *, params: Dict = None, timeout: float,
@@ -143,18 +154,22 @@ def fetch_job_description(job_url: str) -> tuple[str, str]:
             f"https://www.linkedin.com/jobs-guest/jobs/api/jobPosting/{job_id}"
         )
         resp = _linkedin_get(detail_url, timeout=10)
-        soup = BeautifulSoup(resp.text, "html.parser")
-
-        desc_el = soup.find("div", class_="description__text")
-        description = desc_el.get_text(separator="\n", strip=True) if desc_el else ""
-
-        apply_el = soup.find("a", class_="apply-button")
-        apply_link = apply_el["href"] if apply_el else ""
-
-        return description, apply_link
     except Exception as e:
+        # Could not read the page (throttle survived retries, network, bad URL).
+        # Raise rather than return a blank the caller cannot tell from an empty
+        # posting — a throttled fetch must be retryable, not silently stored.
         logger.warning(f"Failed to fetch job description for {job_url}: {e}")
-        return "", ""
+        raise DescriptionFetchError(str(e)) from e
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+
+    desc_el = soup.find("div", class_="description__text")
+    description = desc_el.get_text(separator="\n", strip=True) if desc_el else ""
+
+    apply_el = soup.find("a", class_="apply-button")
+    apply_link = apply_el["href"] if apply_el else ""
+
+    return description, apply_link
 
 
 def scrape_linkedin(keyword: str, start: int = 0) -> List[Dict]:
@@ -183,7 +198,14 @@ def scrape_linkedin(keyword: str, start: int = 0) -> List[Dict]:
                 # Space per-job description fetches to stay under the throttle;
                 # jitter de-synchronises the cadence so it is less fingerprintable.
                 time.sleep(1.5 + random.uniform(0, 0.5))
-                desc, apply = fetch_job_description(job["job_url"])
+                try:
+                    desc, apply = fetch_job_description(job["job_url"])
+                except DescriptionFetchError:
+                    # One posting we could not read is not worth losing the whole
+                    # keyword's results — keep the job with an empty description
+                    # (job_url is preserved, so repair_descriptions.py can recover
+                    # it later) and move on.
+                    desc, apply = "", ""
                 job["description"] = desc
                 job["apply_link"] = apply
                 jobs.append(job)

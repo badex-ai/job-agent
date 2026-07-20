@@ -619,9 +619,10 @@ def main(argv=None):
     ap.add_argument("--cooldown", type=float, default=60.0,
                     help="seconds to sleep after each live gate call, to keep "
                          "the M4 cool on a full held-out run (default 60; 0 "
-                         "disables). Adaptive: backs off on latency creep, capped "
-                         f"at {EVAL_COOLDOWN_MAX_S:g}s (< keep_alive). Ignored for "
-                         "--stub-model. Thermal-only: does not change verdicts.")
+                         "disables). Fixed interval, not adaptive; clamped below "
+                         f"{EVAL_COOLDOWN_MAX_S:g}s so it stays under keep_alive. "
+                         "Ignored for --stub-model. Thermal-only: does not change "
+                         "verdicts.")
     args = ap.parse_args(argv)
     if args.cooldown >= EVAL_COOLDOWN_MAX_S:
         print(f"[PACE] --cooldown {args.cooldown:g}s >= {EVAL_COOLDOWN_MAX_S:g}s "

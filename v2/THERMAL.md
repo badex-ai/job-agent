@@ -33,9 +33,12 @@ it is mostly idle-cooling with brief warm blips, and its length is what keeps it
 cool. You never need to send fewer jobs — space them. The scraper/query workflow's
 randomised intervals are already the cool pattern.
 
-`eval_gate.py`'s cooldown is adaptive: it backs off further when latency creeps
-past 1.5× a running minimum (a throttling proxy), capped under the 5-minute
-`keep_alive` so the model never unloads mid-batch.
+`eval_gate.py`'s cooldown is a fixed interval, clamped under the 5-minute
+`keep_alive` so the model never unloads mid-batch. It used to adapt — backing off
+on latency creep past 1.5× a running minimum — but that ratcheted to the cap on a
+cool GPU (latency does not track heat on this hardware; see the 2026-07-15 capture
+above), so the adaptive arm was removed in favour of the fixed spacing this file
+argues for.
 
 ## What is NOT a lever
 
