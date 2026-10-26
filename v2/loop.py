@@ -189,7 +189,16 @@ def gate_pending(session, *, offline: bool, model: str = GATE_MODEL,
         from v2.gate_prompt import build_system_prompt
         system_prompt = build_system_prompt()
 
-    pending = session.query(Job).filter(Job.gate_verdict.is_(None))
+    # A blank description gives Qwen nothing to judge — the prompt and rubric
+    # assume real body text, and hard_gates.py keys its regexes off it too, so
+    # an empty one silently disables the salary/sponsorship/location checks.
+    # Excluding beats gating-on-empty: the verdict would be indistinguishable
+    # in the DB from a real one while resting on nothing, and a wrong verdict
+    # buries a good job (§6a). These rows stay NULL until
+    # v2/repair_descriptions.py fills the column, which needs no M4 time.
+    pending = session.query(Job).filter(
+        Job.gate_verdict.is_(None),
+        Job.description.isnot(None), Job.description != "")
     if limit:
         pending = pending.limit(limit)
     pending = pending.all()
@@ -254,7 +263,13 @@ def cycle(*, offline: bool, scrape: bool = True,
                                cooldown_s=cooldown_s)
 
         stored = 0
-        if scrape and not summary["m4_down"]:
+        if scrape:
+            # Scrape even when the gate is dead. The LinkedIn search is filtered
+            # to a narrow recency window (LINKEDIN_FILTERS f_TPR), so an hour not
+            # scraped is an hour of postings lost for good — whereas a job stored
+            # ungated costs nothing but a row and is picked up by the next cycle's
+            # backlog pass. Losing postings to a sleeping laptop is the expensive
+            # error; a longer NULL queue is the cheap one.
             from shared.scraper.job_scraper import run_scrape
             logger.info("[READ] scraping...")
             raw = run_scrape()
@@ -262,19 +277,20 @@ def cycle(*, offline: bool, scrape: bool = True,
             stored = _store_new_jobs(session, raw)
             logger.info(f"[READ] {stored} new jobs stored (rest already seen)")
 
-            # Gate the freshly-stored jobs in the same cycle (folding the second
-            # pass's counts into the summary). Skipped if the M4 was already found
-            # down above — no point scraping into a dead gate.
-            logger.info("[GATE] scoring newly-stored rows...")
-            second = gate_pending(session, offline=offline, model=model, limit=limit,
-                                  cooldown_s=cooldown_s)
-            for k in ("gated", "surfaced", "skipped"):
-                summary[k] += second[k]
-            for src, n in second["by_source"].items():
-                summary["by_source"][src] = summary["by_source"].get(src, 0) + n
-            summary["m4_down"] = summary["m4_down"] or second["m4_down"]
-        elif scrape and summary["m4_down"]:
-            logger.warning("[READ] skipping scrape — M4 is down, gate is dead.")
+            if summary["m4_down"]:
+                logger.warning(f"[GATE] M4 down — {stored} new jobs stored UNGATED; "
+                               f"they queue for the next cycle.")
+            else:
+                # Gate the freshly-stored jobs in the same cycle (folding the
+                # second pass's counts into the summary).
+                logger.info("[GATE] scoring newly-stored rows...")
+                second = gate_pending(session, offline=offline, model=model, limit=limit,
+                                      cooldown_s=cooldown_s)
+                for k in ("gated", "surfaced", "skipped"):
+                    summary[k] += second[k]
+                for src, n in second["by_source"].items():
+                    summary["by_source"][src] = summary["by_source"].get(src, 0) + n
+                summary["m4_down"] = summary["m4_down"] or second["m4_down"]
 
         summary["stored"] = stored
         logger.info(f"[GATE] {summary['gated']} gated — "
@@ -327,8 +343,12 @@ def main(argv=None):
                         cooldown_s=args.cooldown)
 
     if args.once or args.no_scrape:
-        run()
-        return 0
+        summary = run()
+        # Exit code carries the outcome so a scheduled run can be trusted: 0 =
+        # the cycle gated what it set out to, 1 = the M4 was unreachable and the
+        # NULL rows are still pending. Without this every run looks identical to
+        # cron: exit 0 while nothing happened.
+        return 1 if summary.get("m4_down") else 0
 
     # hourly scheduler, mirroring v1's loop (apscheduler, single instance).
     from apscheduler.schedulers.blocking import BlockingScheduler
