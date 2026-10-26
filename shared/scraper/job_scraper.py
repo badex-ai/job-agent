@@ -22,6 +22,20 @@ from shared.config import LINKEDIN_GUEST_API, LINKEDIN_FILTERS, SEARCH_KEYWORDS
 
 logger = logging.getLogger(__name__)
 
+# pandas/JobSpy hand back NaT/None for a missing date, and str() turns those into
+# the literal text "None"/"nan" — a truthy 4-char string that every downstream
+# "is it empty?" check waves through, so a job with no date looks like a job with
+# a date until you try to parse it. Normalise junk to "" at the boundary, before
+# it can reach the DB. (v2/dedup.clean_date does the same for the merge path;
+# duplicated here on purpose — shared/ must not import from v2/.)
+_JUNK_DATE = {"", "None", "nan", "NaT", "none", "NaN", "null", "NaTType"}
+
+
+def _clean_date(value) -> str:
+    """Return a usable date string, or '' for pandas-null junk ('None'/'nan')."""
+    s = "" if value is None else str(value).strip()
+    return "" if s in _JUNK_DATE else s
+
 HEADERS = {
     "User-Agent": (
         "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
@@ -137,7 +151,7 @@ def _parse_job_card(card) -> Dict:
             "company": company_el.get_text(strip=True) if company_el else "",
             "location": location_el.get_text(strip=True) if location_el else "",
             "job_url": link_el["href"] if link_el else "",
-            "date_posted": date_el.get("datetime", "") if date_el else "",
+            "date_posted": _clean_date(date_el.get("datetime", "")) if date_el else "",
             "source": "linkedin",
             "description": "",   # filled in by fetch_job_description()
             "apply_link": "",
@@ -262,7 +276,7 @@ def _indeed_pass(keyword: str, country: str, wanted: int,
             "location": row.get("location", "") or country,
             "job_url": row.get("job_url", ""),
             "apply_link": row.get("job_url", ""),
-            "date_posted": str(row.get("date_posted", "")),
+            "date_posted": _clean_date(row.get("date_posted", "")),
             "description": row.get("description", ""),
             "source": "indeed",
             "is_remote": bool(remote_only),
@@ -346,7 +360,7 @@ def scrape_remotive(keyword: str) -> List[Dict]:
             "location": row.get("candidate_required_location", "") or "Remote",
             "job_url": row.get("url", ""),
             "apply_link": row.get("url", ""),
-            "date_posted": str(row.get("publication_date", "")),
+            "date_posted": _clean_date(row.get("publication_date", "")),
             "description": row.get("description", ""),
             "source": "remotive",
             "is_remote": True,
@@ -375,7 +389,7 @@ def scrape_himalayas(keyword: str) -> List[Dict]:
             "location": ", ".join(restrictions) if restrictions else "Remote",
             "job_url": row.get("guid", ""),
             "apply_link": row.get("applicationLink", "") or row.get("guid", ""),
-            "date_posted": str(row.get("pubDate", "")),
+            "date_posted": _clean_date(row.get("pubDate", "")),
             "description": row.get("description", ""),
             "source": "himalayas",
             "is_remote": True,
@@ -413,7 +427,7 @@ def scrape_linkedin_jobs(keyword: str) -> List[Dict]:
                 "location": row.get("location", ""),
                 "job_url": row.get("job_url", ""),
                 "apply_link": row.get("job_url", ""),
-                "date_posted": str(row.get("date_posted", "")),
+                "date_posted": _clean_date(row.get("date_posted", "")),
                 "description": row.get("description", ""),
                 "source": "linkedin",
                 "is_remote": True,
