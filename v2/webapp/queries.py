@@ -82,6 +82,13 @@ def _job_view(job: Job, note: Optional[str] = None) -> dict:
         "note": note,
         # priority flag drives the surface_priority highlight (plan §3).
         "priority": job.gate_verdict == "surface_priority",
+        # Two dates, deliberately distinct. scraped_at is when WE saw the job and
+        # is populated on every row, so it is what the recency filter keys on.
+        # date_posted is LinkedIn's own date and is often genuinely absent (the
+        # scraper used to store the text "None" there); it is display-only, and
+        # None means "not published", never "no filter match".
+        "scraped_at": job.scraped_at.isoformat() if job.scraped_at else None,
+        "date_posted": job.date_posted or None,
     }
 
 
@@ -214,6 +221,11 @@ def _application_row(job: Optional[Job], state) -> dict:
         # not on the Application log; expose it as an ISO date for the Date column.
         "applied_at": (job.applied_at.date().isoformat()
                        if job and job.applied_at else None),
+        # The recency filter keys on the Application LOG's own timestamp, not on
+        # Job.applied_at: the log row is written by the action itself, so it is
+        # present for every tracked event, while applied_at lives on the Job row
+        # and is only set by the mark_applied dual-write.
+        "acted_at": state.created_at.isoformat() if state.created_at else None,
     }
 
 

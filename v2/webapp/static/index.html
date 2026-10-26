@@ -35,6 +35,10 @@
   :root[data-theme="dark"]{--ground:#1A1B1E;--card:#212327;--ink:#E6E4DF;--ink-soft:#A2A19C;--ink-faint:#75746F;--line:#303237;--line-strong:#3B3E44;--accent:#5FA3A1;--accent-ink:#8FC3C1;--priority:#D6A45C;--skip:#D07A6D;--consider:#6E9BD6;--hold:#A896C4;--shadow:0 1px 2px rgba(0,0,0,.2),0 8px 24px rgba(0,0,0,.26);}
 
   * { box-sizing:border-box; }
+  /* Always reserve the scrollbar gutter. A long card list scrolls and a short
+     Applied table does not, so without this the whole layout shifts ~7px
+     sideways every time you switch between them. */
+  html { scrollbar-gutter: stable; }
   body { margin:0; background:var(--ground); color:var(--ink); font-family:var(--font);
     font-size:14px; line-height:1.6; -webkit-font-smoothing:antialiased; }
 
@@ -64,6 +68,86 @@
     background:var(--ground); border:1px solid var(--line); border-radius:20px; padding:0 8px; }
   .tab.on .n { color:var(--accent-ink); border-color:color-mix(in srgb,var(--accent) 40%,var(--line)); }
   .swatch { width:8px; height:8px; border-radius:50%; flex:none; }
+
+  /* Recency filter + sort. One control row shared by every tab: on the job
+     buckets it filters by scraped_at (when WE saw the posting), on the two
+     tracking tabs by when the action was logged. Deliberately NOT a calendar —
+     the useful question is "what is fresh", not "what landed on the 17th". */
+  .filters { display:flex; align-items:center; gap:10px; flex-wrap:wrap;
+    max-width:1080px; margin:0 auto; padding:14px 28px 0; }
+  .chips { display:flex; gap:4px; flex-wrap:wrap; }
+  .chip { font:inherit; font-size:12.5px; padding:4px 11px; border-radius:20px; cursor:pointer;
+    color:var(--ink-soft); background:var(--card); border:1px solid var(--line);
+    white-space:nowrap; }
+  .chip:hover { color:var(--ink); border-color:var(--ink-faint); }
+  .chip.on { color:var(--accent-ink); font-weight:600;
+    background:color-mix(in srgb,var(--accent) 12%,var(--card));
+    border-color:color-mix(in srgb,var(--accent) 45%,var(--line)); }
+  .chip:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .filters .spacer { flex:1 1 auto; }
+  .filters .sortlbl { font-size:12.5px; color:var(--ink-faint); }
+  /* "showing N of M" — the honest read when a filter hides rows. */
+  .fcount { font-size:12.5px; color:var(--ink-faint); font-variant-numeric:tabular-nums; }
+  /* Day calendar. Deliberately keyed on the dates we HAVE: a day with no jobs
+     is rendered dead, so you can never click your way to an empty screen. On
+     the job tabs the days are scrape dates; on Applied/Dismissed they are the
+     dates you acted. */
+  /* The calendar is a POPOVER anchored to its button, not a row in the layout:
+     it floats above the cards (z-index) and its left edge lines up with the
+     button's left edge, so it reads as belonging to that control. The wrapper
+     is the positioning context; it takes no space of its own. */
+  .calwrap { position:relative; display:inline-flex; }
+  .cal { position:absolute; top:calc(100% + 6px); left:0; z-index:40; }
+  .calbox { background:var(--card); border:1px solid var(--line);
+    border-radius:10px; padding:10px 12px 12px; box-shadow:var(--shadow); }
+  .calhead { display:flex; align-items:center; gap:8px; margin-bottom:8px; }
+  .calhead .mo { font-size:13px; font-weight:600; min-width:9.5em; text-align:center; }
+  .calnav { font:inherit; font-size:14px; line-height:1; padding:3px 8px; cursor:pointer;
+    color:var(--ink-soft); background:none; border:1px solid var(--line); border-radius:6px; }
+  .calnav:hover:not(:disabled) { color:var(--ink); border-color:var(--ink-faint); }
+  .calnav:disabled { opacity:.35; cursor:default; }
+  .calnav:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .calgrid { display:grid; grid-template-columns:repeat(7,30px); gap:2px; }
+  .caldow { font-size:10.5px; color:var(--ink-faint); text-align:center; padding-bottom:3px;
+    text-transform:uppercase; letter-spacing:.05em; }
+  .calday { font:inherit; font-size:12.5px; height:28px; border-radius:6px; border:1px solid transparent;
+    background:none; color:var(--ink-faint); font-variant-numeric:tabular-nums; padding:0; }
+  /* a day that actually holds jobs: readable, boxed, clickable */
+  .calday.has { color:var(--ink); background:var(--ground); border-color:var(--line);
+    cursor:pointer; font-weight:600; }
+  .calday.has:hover { border-color:var(--accent); color:var(--accent-ink); }
+  /* Selected day. The accent is a DARK teal in light mode and a LIGHT teal in
+     dark mode, so a fixed white label fails contrast on one of them; pin the
+     label to the ground colour instead, which inverts with the theme. */
+  .calday.on { background:var(--accent); border-color:var(--accent); color:#fff; }
+  /* Dark mode's accent is a LIGHT teal, so a white label on it fails contrast
+     (2.9:1). Flip the label to the dark ground there — 5.9:1 — while light mode
+     keeps white on its dark teal at 4.6:1. */
+  :root:not([data-theme="light"]) .calday.on { color:var(--ground); }
+  @media (prefers-color-scheme: light) {
+    :root:not([data-theme="dark"]) .calday.on { color:#fff; }
+  }
+  :root[data-theme="dark"] .calday.on { color:var(--ground); }
+  .calday:disabled { cursor:default; }
+  .calday:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  .calfoot { margin-top:9px; font-size:12px; color:var(--ink-faint); display:flex;
+    align-items:center; gap:10px; }
+  .calclear { font:inherit; font-size:12px; padding:2px 9px; cursor:pointer; border-radius:20px;
+    color:var(--accent-ink); background:none; border:1px solid color-mix(in srgb,var(--accent) 45%,var(--line)); }
+  .calclear:hover { background:color-mix(in srgb,var(--accent) 12%,var(--card)); }
+  .calclear:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+  /* toggle that opens/closes the calendar, sits in the filter row */
+  .caltoggle { font:inherit; font-size:12.5px; padding:4px 11px; border-radius:20px; cursor:pointer;
+    color:var(--ink-soft); background:var(--card); border:1px solid var(--line); white-space:nowrap; }
+  .caltoggle:hover { color:var(--ink); border-color:var(--ink-faint); }
+  .caltoggle.on { color:var(--accent-ink); font-weight:600;
+    background:color-mix(in srgb,var(--accent) 12%,var(--card));
+    border-color:color-mix(in srgb,var(--accent) 45%,var(--line)); }
+  .caltoggle:focus-visible { outline:2px solid var(--accent); outline-offset:1px; }
+
+  /* the age line on a job card (.when is already taken by the gate banner) */
+  .seen { font-size:12.5px; color:var(--ink-faint); font-variant-numeric:tabular-nums;
+    white-space:nowrap; }
   /* the browse | tracking seam: a thin rule between the four gate buckets and
      the two lifecycle tabs, so "jobs to triage" reads apart from "what I did". */
   .tabgap { align-self:stretch; width:1px; background:var(--line-strong); margin:6px 10px 0; flex:none; }
@@ -162,7 +246,12 @@
   .failed { color:var(--skip); }
 
   /* tracking tables (Applied / Dismissed) */
-  .tbl-wrap { max-width:1080px; margin:0 auto; padding:22px 28px 60px; overflow-x:auto; }
+  /* The wrapper sits INSIDE #list, which already applies the 1080px max-width,
+     the centring and the 28px gutter — repeating them here indented the table
+     by a second gutter and, because #list is a flex column, let the wrapper
+     shrink to its content (a ~650px table against 1024px cards). Stretch to
+     the parent's content box and keep only the horizontal scroll. */
+  .tbl-wrap { width:100%; align-self:stretch; overflow-x:auto; }
   table.trk { width:100%; border-collapse:collapse; background:var(--card);
     border:1px solid var(--line); border-radius:var(--radius); box-shadow:var(--shadow);
     overflow:hidden; font-size:13.5px; }
@@ -239,6 +328,8 @@
 
 <div class="tabs" id="tabs" role="tablist" aria-label="Buckets"></div>
 
+<div class="filters" id="filters" hidden></div>
+
 <div class="list" id="list" role="tabpanel">
   <p class="empty">Loading…</p>
 </div>
@@ -285,7 +376,318 @@ const SVG_DOC = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stro
 let state = {
   buckets: {}, counts: {}, cvs: [], cv: null, active: "APPLY",
   applied: [], dismissed: [], gate: null,
+  // recency filter, shared across tabs; "all" until the user narrows it.
+  range: "all", sort: "newest",
+  // calendar: `day` is a "YYYY-MM-DD" local key, mutually exclusive with `range`.
+  calOpen: false, day: null, calMonth: null,
 };
+
+const MONTHS_LONG = ["January","February","March","April","May","June",
+  "July","August","September","October","November","December"];
+
+// Recency windows, in days. Chosen over a calendar on purpose: with postings
+// arriving continuously the question is "what is fresh?", and a date grid makes
+// you click a specific day to answer it. "all" is the escape hatch and stays
+// first so nothing is ever hidden by default.
+const RANGES = [
+  { key: "all",   label: "All",          days: null },
+  { key: "7",     label: "Past week",    days: 7 },
+  { key: "14",    label: "Past 2 weeks", days: 14 },
+  { key: "30",    label: "Past month",   days: 30 },
+];
+
+// Which timestamp each tab filters on. Job cards use scraped_at (when we saw
+// the posting — populated on every row, unlike LinkedIn's own date_posted,
+// which is absent on ~3/4 of them). The tracking tabs use the Application
+// log's created_at, i.e. when the action was actually taken.
+function rowDate(row, tab) {
+  const raw = (tab === "APPLIED" || tab === "DISMISSED")
+    ? (row.acted_at || row.applied_at)
+    : row.scraped_at;
+  if (!raw) return null;
+  const d = new Date(raw);
+  return isNaN(d.getTime()) ? null : d;
+}
+
+// Filter by the active window, then sort. A row with NO usable date is KEPT
+// under "all" but dropped by a narrowed window — it cannot be shown to be
+// recent, and silently presenting undated rows as fresh is the exact lie the
+// date_posted="None" bug told for 754 rows.
+function applyFilter(rows, tab) {
+  let out = rows;
+  // A picked day wins outright — the chips were reset to "all" when it was
+  // picked, so the two can never both narrow the list.
+  if (state.day) {
+    out = rows.filter((r) => { const d = rowDate(r, tab); return d && dayKey(d) === state.day; });
+    return out;
+  }
+  const win = RANGES.find((r) => r.key === state.range);
+  if (win && win.days !== null) {
+    const cut = Date.now() - win.days * 86400000;
+    out = rows.filter((r) => { const d = rowDate(r, tab); return d && d.getTime() >= cut; });
+  }
+  if (state.sort === "newest") {
+    // Undated rows sink to the bottom rather than jumping the queue.
+    out = out.slice().sort((a, b) => {
+      const da = rowDate(a, tab), db = rowDate(b, tab);
+      if (!da && !db) return 0;
+      if (!da) return 1;
+      if (!db) return -1;
+      return db - da;
+    });
+  }
+  return out;
+}
+
+// "18 Apr 2026" — short, unambiguous, no locale surprises in a table column.
+const MONTHS = ["Jan","Feb","Mar","Apr","May","Jun","Jul","Aug","Sep","Oct","Nov","Dec"];
+function fmtDate(raw) {
+  if (!raw) return null;
+  // A bare "YYYY-MM-DD" is parsed as UTC midnight by spec, which renders as the
+  // PREVIOUS day anywhere west of Greenwich. Build those as a local date so a
+  // day key always prints as the day the user clicked.
+  const bare = typeof raw === "string" && /^\d{4}-\d{2}-\d{2}$/.test(raw);
+  const d = bare
+    ? new Date(Number(raw.slice(0, 4)), Number(raw.slice(5, 7)) - 1, Number(raw.slice(8, 10)))
+    : new Date(raw);
+  if (isNaN(d.getTime())) return null;
+  return `${d.getDate()} ${MONTHS[d.getMonth()]} ${d.getFullYear()}`;
+}
+
+// Relative age, for the card line. Precise enough to judge staleness at a
+// glance without doing arithmetic on a date.
+function ago(raw) {
+  const d = raw ? new Date(raw) : null;
+  if (!d || isNaN(d.getTime())) return null;
+  const days = Math.floor((Date.now() - d.getTime()) / 86400000);
+  if (days <= 0) return "today";
+  if (days === 1) return "yesterday";
+  if (days < 30) return days + "d ago";
+  const months = Math.floor(days / 30);
+  return months === 1 ? "1mo ago" : months + "mo ago";
+}
+
+// --- day calendar -----------------------------------------------------------
+// The calendar and the range chips are two answers to the same question, so
+// only one is ever active: picking a day resets the chips to "all", picking a
+// chip clears the day. Keeping both live would let them contradict each other
+// and there would be no honest way to render the result.
+
+// Local (not UTC) day key, so a job scraped at 22:00 lands on the day the user
+// actually saw it rather than tomorrow.
+function dayKey(d) {
+  return `${d.getFullYear()}-${String(d.getMonth() + 1).padStart(2, "0")}-`
+       + `${String(d.getDate()).padStart(2, "0")}`;
+}
+
+// {dayKey: count} for the rows of the active tab — this is what makes a day
+// clickable, and what greys out every day we hold nothing for.
+function dayCounts(rows, tab) {
+  const out = new Map();
+  for (const r of rows) {
+    const d = rowDate(r, tab);
+    if (!d) continue;
+    const k = dayKey(d);
+    out.set(k, (out.get(k) || 0) + 1);
+  }
+  return out;
+}
+
+function rowsFor(tab) {
+  if (tab === "APPLIED") return state.applied;
+  if (tab === "DISMISSED") return state.dismissed;
+  return state.buckets[tab] || [];
+}
+
+// Month shown in the calendar; defaults to the most recent month that has data
+// rather than today, so the grid never opens on an empty screen.
+function defaultCalMonth(counts) {
+  const keys = [...counts.keys()].sort();
+  const last = keys.length ? keys[keys.length - 1] : dayKey(new Date());
+  const [y, m] = last.split("-").map(Number);
+  return { y, m: m - 1 };
+}
+
+function renderCalendar() {
+  // The popover is rebuilt by renderFilters on every draw, so it may be absent
+  // (a tab with no dated rows) — bail rather than assume it is there.
+  const box = $("#cal");
+  if (!box) return;
+  if (!state.calOpen) { box.hidden = true; return; }
+  const tab = state.active;
+  const counts = dayCounts(rowsFor(tab), tab);
+  if (counts.size === 0) { box.hidden = true; return; }
+  box.hidden = false;
+
+  if (!state.calMonth) state.calMonth = defaultCalMonth(counts);
+  const { y, m } = state.calMonth;
+
+  // Which months hold anything, so the arrows stop at the edges of real data
+  // instead of letting you page into empty years.
+  const months = [...new Set([...counts.keys()].map((k) => k.slice(0, 7)))].sort();
+  const cur = `${y}-${String(m + 1).padStart(2, "0")}`;
+  const prev = months.filter((x) => x < cur).pop() || null;
+  const next = months.filter((x) => x > cur).shift() || null;
+
+  const jump = (key) => {
+    const [yy, mm] = key.split("-").map(Number);
+    state.calMonth = { y: yy, m: mm - 1 };
+    renderCalendar();
+  };
+
+  const bwd = el("button", { class: "calnav", type: "button", "aria-label": "Previous month with jobs", text: "‹" });
+  bwd.disabled = !prev;
+  bwd.addEventListener("click", () => prev && jump(prev));
+  const fwd = el("button", { class: "calnav", type: "button", "aria-label": "Next month with jobs", text: "›" });
+  fwd.disabled = !next;
+  fwd.addEventListener("click", () => next && jump(next));
+
+  const head = el("div", { class: "calhead" }, bwd,
+    el("span", { class: "mo", text: `${MONTHS_LONG[m]} ${y}` }), fwd);
+
+  const grid = el("div", { class: "calgrid", role: "grid" });
+  for (const d of ["Mo", "Tu", "We", "Th", "Fr", "Sa", "Su"]) {
+    grid.append(el("div", { class: "caldow", text: d }));
+  }
+  // Monday-first offset (JS getDay() is Sunday-first).
+  const first = new Date(y, m, 1);
+  const lead = (first.getDay() + 6) % 7;
+  for (let i = 0; i < lead; i++) grid.append(el("div", {}));
+
+  const days = new Date(y, m + 1, 0).getDate();
+  for (let day = 1; day <= days; day++) {
+    const key = `${y}-${String(m + 1).padStart(2, "0")}-${String(day).padStart(2, "0")}`;
+    const n = counts.get(key) || 0;
+    const selected = state.day === key;
+    const cell = el("button", {
+      class: "calday" + (n ? " has" : "") + (selected ? " on" : ""),
+      type: "button", text: String(day),
+      "aria-pressed": String(selected),
+      title: n ? `${n} ${n === 1 ? "job" : "jobs"}` : "nothing here",
+    });
+    cell.disabled = n === 0;   // a dead day is not clickable, by design
+    if (n) {
+      cell.addEventListener("click", () => {
+        // toggle off if it was already the selection
+        state.day = selected ? null : key;
+        state.range = "all";   // the chips and the calendar never both apply
+        renderFilters(); renderCalendar(); renderList(state.active);
+      });
+    }
+    grid.append(cell);
+  }
+
+  const foot = el("div", { class: "calfoot" });
+  if (state.day) {
+    const n = counts.get(state.day) || 0;
+    foot.append(el("span", { text: `${fmtDate(state.day)} — ${n} ${n === 1 ? "job" : "jobs"}` }));
+    const clear = el("button", { class: "calclear", type: "button", text: "Clear" });
+    clear.addEventListener("click", () => {
+      state.day = null;
+      renderFilters(); renderCalendar(); renderList(state.active);
+    });
+    foot.append(clear);
+  } else {
+    foot.append(el("span", { text: (tab === "APPLIED" || tab === "DISMISSED")
+      ? "Pick a day you acted on" : "Pick a day jobs were seen" }));
+  }
+
+  const panel = el("div", { class: "calbox", role: "dialog",
+                            "aria-label": "Filter by day" }, head, grid, foot);
+  // A click inside the panel is not an "outside" click.
+  panel.addEventListener("click", (e) => e.stopPropagation());
+  box.replaceChildren(panel);
+}
+
+// Close the popover on any click elsewhere on the page, and on Escape. The
+// picked day SURVIVES the close — dismissing the calendar is not the same as
+// clearing the filter, which is what the Clear button and the chips are for.
+function closeCalendar() {
+  if (!state.calOpen) return;
+  state.calOpen = false;
+  renderFilters();
+  renderCalendar();
+}
+document.addEventListener("click", closeCalendar);
+document.addEventListener("keydown", (e) => {
+  if (e.key === "Escape") closeCalendar();
+});
+
+function labelFor(key) {
+  const r = RANGES.find((x) => x.key === key);
+  return r ? r.label.toLowerCase() : "selected range";
+}
+
+// How to name the active narrowing in an empty-state message, so the page never
+// says "past week" when what actually hid the rows was a picked day.
+function activeFilterPhrase() {
+  return state.day ? "on " + fmtDate(state.day) : "in the " + labelFor(state.range);
+}
+
+function renderFilters() {
+  const bar = $("#filters");
+  const tab = state.active;
+  const total = (tab === "APPLIED") ? state.applied.length
+              : (tab === "DISMISSED") ? state.dismissed.length
+              : (state.buckets[tab] || []).length;
+  if (total === 0) { bar.hidden = true; $("#cal").hidden = true; return; }
+  bar.hidden = false;
+  bar.replaceChildren();
+
+  const chips = el("div", { class: "chips", role: "group",
+                            "aria-label": "Filter by recency" });
+  for (const r of RANGES) {
+    const active = !state.day && state.range === r.key;
+    const c = el("button", { class: "chip" + (active ? " on" : ""),
+      type: "button", "aria-pressed": String(active), text: r.label });
+    c.addEventListener("click", () => {
+      state.range = r.key;
+      state.day = null;          // picking a range drops any picked day
+      renderFilters(); renderCalendar(); renderList(state.active);
+    });
+    chips.append(c);
+  }
+  bar.append(chips);
+
+  // Calendar toggle + its popover, wrapped together so the popover can anchor
+  // to the button's left edge. Only offered when the tab's rows actually carry
+  // dates — a calendar over undated rows would be a grid of dead days.
+  const counts = dayCounts(rowsFor(tab), tab);
+  if (counts.size > 0) {
+    const ct = el("button", {
+      class: "caltoggle" + (state.calOpen ? " on" : ""), type: "button",
+      "aria-expanded": String(state.calOpen), "aria-haspopup": "dialog",
+      text: state.day ? "📅 " + fmtDate(state.day) : "📅 By day" });
+    ct.addEventListener("click", (e) => {
+      e.stopPropagation();          // don't let the outside-click handler see this
+      state.calOpen = !state.calOpen;
+      renderFilters(); renderCalendar(); renderList(state.active);
+    });
+    // The popover lives INSIDE the wrapper: `position:absolute; left:0` then
+    // pins it to the button's left edge rather than the page.
+    bar.append(el("div", { class: "calwrap" }, ct,
+      el("div", { class: "cal", id: "cal", hidden: "" })));
+  }
+
+  const shown = applyFilter(
+    tab === "APPLIED" ? state.applied
+    : tab === "DISMISSED" ? state.dismissed
+    : (state.buckets[tab] || []), tab).length;
+  bar.append(el("span", { class: "fcount",
+    text: shown === total ? `${total}` : `${shown} of ${total}` }));
+
+  bar.append(el("span", { class: "spacer" }));
+  // One toggle, not a two-way sort. The gate assigns a BUCKET, not a score, so
+  // there is no "best first" ordering to offer inside a single tab — off simply
+  // restores the API's own order (gate_run_at DESC).
+  const newest = el("button", { class: "chip" + (state.sort === "newest" ? " on" : ""),
+    type: "button", "aria-pressed": String(state.sort === "newest"), text: "Newest first" });
+  newest.addEventListener("click", () => {
+    state.sort = state.sort === "newest" ? "default" : "newest";
+    renderFilters(); renderList(state.active);
+  });
+  bar.append(newest);
+}
 
 const $ = (sel, root = document) => root.querySelector(sel);
 function el(tag, attrs = {}, ...kids) {
@@ -424,6 +826,12 @@ function selectTab(tab) {
     t.classList.toggle("on", b === tab);
     t.setAttribute("aria-selected", String(b === tab));
   }
+  // A day picked on one tab is meaningless on the next (different dates, and
+  // the Applied tab keys on a different field entirely), so drop it on switch.
+  state.day = null;
+  state.calMonth = null;
+  renderFilters();
+  renderCalendar();
   renderList(tab);
 }
 
@@ -433,9 +841,18 @@ function renderList(tab) {
   if (tab === "APPLIED") return renderAppliedTable(list);
   if (tab === "DISMISSED") return renderDismissedTable(list);
 
-  const jobs = state.buckets[tab] || [];
-  if (jobs.length === 0) {
+  const all = state.buckets[tab] || [];
+  if (all.length === 0) {
     list.replaceChildren(el("p", { class: "empty", text: EMPTY_COPY[tab] }));
+    return;
+  }
+  const jobs = applyFilter(all, tab);
+  if (jobs.length === 0) {
+    // The bucket has jobs; the window hid them. Say which, so an empty screen
+    // never reads as "no work" when it means "nothing recent".
+    list.replaceChildren(el("p", { class: "empty",
+      text: `No jobs seen ${activeFilterPhrase()}. ${all.length} other `
+          + `${all.length === 1 ? "job is" : "jobs are"} hidden — pick "All" to see them.` }));
     return;
   }
   list.replaceChildren(...jobs.map((j) => jobCard(j, tab)));
@@ -569,10 +986,18 @@ function renderAppliedTable(list) {
     list.replaceChildren(el("p", { class: "empty", text: EMPTY_COPY.APPLIED }));
     return;
   }
-  const rows = state.applied.map((r) => {
+  const shown = applyFilter(state.applied, "APPLIED");
+  if (shown.length === 0) {
+    list.replaceChildren(el("p", { class: "empty",
+      text: `Nothing applied ${activeFilterPhrase()}. `
+          + `${state.applied.length} other ${state.applied.length === 1 ? "entry is" : "entries are"}`
+          + ` hidden — pick "All" to see them.` }));
+    return;
+  }
+  const rows = shown.map((r) => {
     const tr = el("tr", {},
       jobCell(r),
-      el("td", { class: "date", text: r.applied_at || "—" }));
+      el("td", { class: "date", text: fmtDate(r.acted_at || r.applied_at) || "—" }));
     tr.append(el("td", {}, statusPill(r)));
     tr.append(cvCell(r.cv, r.id));
     tr.append(noteCell(r.note, r.id));
@@ -612,18 +1037,29 @@ function renderDismissedTable(list) {
     list.replaceChildren(el("p", { class: "empty", text: EMPTY_COPY.DISMISSED }));
     return;
   }
-  const rows = state.dismissed.map((r) => {
+  const shownD = applyFilter(state.dismissed, "DISMISSED");
+  if (shownD.length === 0) {
+    list.replaceChildren(el("p", { class: "empty",
+      text: `Nothing dismissed ${activeFilterPhrase()}. `
+          + `${state.dismissed.length} other ${state.dismissed.length === 1 ? "entry is" : "entries are"}`
+          + ` hidden — pick "All" to see them.` }));
+    return;
+  }
+  const rows = shownD.map((r) => {
     const restore = el("button", { class: "restore", type: "button", text: "Restore" });
     restore.addEventListener("click", async () => {
       restore.disabled = true;
       const ok = await postAction({ action: "restore", job_id: r.id });
       if (!ok) restore.disabled = false;
     });
-    return el("tr", {}, jobCell(r), noteCell(r.note, r.id), el("td", {}, restore));
+    return el("tr", {}, jobCell(r),
+      el("td", { class: "date", text: fmtDate(r.acted_at) || "—" }),
+      noteCell(r.note, r.id), el("td", {}, restore));
   });
   const table = el("table", { class: "trk" },
     el("thead", {}, el("tr", {},
-      el("th", { text: "Job" }), el("th", { text: "Notes" }), el("th", { text: "" }))),
+      el("th", { text: "Job" }), el("th", { text: "Dismissed" }),
+      el("th", { text: "Notes" }), el("th", { text: "" }))),
     el("tbody", {}, ...rows));
   list.replaceChildren(el("div", { class: "tbl-wrap" }, table));
 }
@@ -639,6 +1075,17 @@ function jobCard(job, bucket) {
 
   const line = el("p", { class: "line" });
   if (job.location) line.append(document.createTextNode(job.location));
+  // Age of the posting. "Seen" (scraped_at) is what we can always vouch for;
+  // LinkedIn's own posted date is appended only when it is actually there.
+  const seen = ago(job.scraped_at);
+  if (seen) {
+    if (job.location) line.append(el("span", { class: "sep", text: "·" }));
+    const posted = fmtDate(job.date_posted);
+    line.append(el("span", { class: "seen",
+      title: "Scraped " + (fmtDate(job.scraped_at) || "—")
+             + (posted ? " · posted " + posted : " · no posting date from LinkedIn"),
+      text: "seen " + seen + (posted ? " · posted " + posted : "") }));
+  }
 
   const body = el("div", {}, head, line);
 
