@@ -102,3 +102,4 @@ htmlcov/
 *.bak
 *.tmp
 *.temp
+data/logs/

@@ -68,7 +68,12 @@ for job_type in JOB_TYPES.values():
 LINKEDIN_FILTERS = {
     "location": "Worldwide",
     "f_WT": "2",       # remote only
-    "f_TPR": "r3600",  # posted in last 1 hour
+    # Recency window, in seconds. MUST be >= the scheduled scrape interval or
+    # postings falling between two runs are never seen: the search simply does
+    # not return them, and nothing downstream can recover what was never
+    # fetched. Sized to the 3-hourly cron (v2/cron_run.sh) with headroom for a
+    # run that starts late or takes longer than usual.
+    "f_TPR": "r14400",  # posted in last 4 hours
     "sortBy": "R",     # most relevant
 }
 
