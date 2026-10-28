@@ -22,7 +22,8 @@
 
 set -uo pipefail
 
-REPO="/path/to/job-agent"
+# The repo is wherever this script lives; cron calls it by absolute path.
+REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd)"
 PYTHON="$REPO/.venv/bin/python"
 LOG_DIR="$REPO/data/logs"
 LOG="$LOG_DIR/cron.log"
