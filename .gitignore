@@ -14,6 +14,9 @@ v2.txt
 config/_profile.yml
 shared/config/_profile.yml
 
+# Your gate rules, derived from your own labels (copy v2/rubric.example.md)
+v2/rubric.md
+
 # All personal job-search data: scraped postings, CVs, hand-labels, the DB,
 # and the labeling working files. labels.json is ground truth but personal —
 # back it up privately, never push it.

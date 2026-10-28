@@ -46,7 +46,8 @@ def test_blank_descriptions_never_reach_the_gate(Session):
     _job(session, "null", description=None)
     _job(session, "empty", description="")
 
-    summary = loop.gate_pending(session, offline=True, cooldown_s=0)
+    summary = loop.gate_pending(session, offline=True, cooldown_s=0,
+                                 system_prompt="offline test prompt")
 
     assert summary["gated"] == 1
     by_id = {j.id: j for j in session.query(Job).all()}
@@ -61,8 +62,10 @@ def test_blank_rows_stay_out_of_the_queue_on_every_pass(Session):
     _job(session, "null", description=None)
     _job(session, "empty", description="")
 
-    first = loop.gate_pending(session, offline=True, cooldown_s=0)
-    second = loop.gate_pending(session, offline=True, cooldown_s=0)
+    first = loop.gate_pending(session, offline=True, cooldown_s=0,
+                              system_prompt="offline test prompt")
+    second = loop.gate_pending(session, offline=True, cooldown_s=0,
+                               system_prompt="offline test prompt")
 
     assert first["gated"] == 0
     assert second["gated"] == 0
@@ -75,12 +78,16 @@ def test_a_repaired_description_becomes_gate_eligible(Session):
     session = Session()
     _job(session, "blank", description=None)
 
-    assert loop.gate_pending(session, offline=True, cooldown_s=0)["gated"] == 0
+    summary = loop.gate_pending(session, offline=True, cooldown_s=0,
+                                 system_prompt="offline test prompt")
+    assert summary["gated"] == 0
 
     session.query(Job).filter(Job.id == "blank").one().description = (
         "Backend role, Django, remote within EU."
     )
     session.commit()
 
-    assert loop.gate_pending(session, offline=True, cooldown_s=0)["gated"] == 1
+    summary = loop.gate_pending(session, offline=True, cooldown_s=0,
+                                 system_prompt="offline test prompt")
+    assert summary["gated"] == 1
     assert session.query(Job).filter(Job.id == "blank").one().gate_verdict is not None

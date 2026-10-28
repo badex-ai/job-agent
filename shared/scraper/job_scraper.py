@@ -18,7 +18,9 @@ from typing import List, Dict
 import sys
 import os
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.dirname(__file__))))
-from shared.config import LINKEDIN_GUEST_API, LINKEDIN_FILTERS, SEARCH_KEYWORDS
+from shared.config import (
+    INDEED_PASSES, LINKEDIN_GUEST_API, LINKEDIN_FILTERS, SEARCH_KEYWORDS,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -284,23 +286,8 @@ def _indeed_pass(keyword: str, country: str, wanted: int,
     return jobs
 
 
-# (country, results_wanted, remote_only). Indeed is per-country — there is no
-# worldwide domain, and country_indeed="worldwide" returns nothing, so "the
-# whole market" is spelled out as the countries that actually post remote roles.
-# The home country is NOT remote-filtered: the candidate lives there, so onsite and hybrid are real
-# options, and Indeed's home-country index had almost nothing tagged remote anyway
-# (measured: bare=5 jobs, is_remote=True=0). Everywhere else is remote-only —
-# the candidate cannot commute to Utah.
-INDEED_PASSES = [
-    ("home-country", 25, False),
-    ("usa", 20, True),
-    ("uk", 15, True),
-    ("canada", 10, True),
-]
-
-
 def scrape_indeed(keyword: str) -> List[Dict]:
-    """Indeed: everything local to the home country, plus remote roles abroad."""
+    """Indeed: one pass per INDEED_PASSES entry in the profile."""
     jobs, seen = [], set()
     for country, wanted, remote_only in INDEED_PASSES:
         try:

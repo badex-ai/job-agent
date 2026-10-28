@@ -1,4 +1,7 @@
 import os
+from pathlib import Path
+
+import yaml
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -20,44 +23,26 @@ LINKEDIN_GUEST_API = (
     "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
 )
 
-# Job type CVs — map keywords to CV files
-# REFINED: Only keywords that match your target stack + experience
-JOB_TYPES = {
-    "devops": {
-        "keywords": [
-            "devops engineer",
-            "kubernetes engineer",
-            "platform engineer",
-            "site reliability engineer",
-            "infrastructure engineer",
-            "cloud engineer",
-            "aws devops",
-        ],
-        "cv_file": "data/cv_devops.txt",
-    },
-    "frontend": {
-        "keywords": [
-            "frontend developer",
-            "react developer",
-            "typescript developer",
-            "next.js developer",
-            "web developer",
-        ],
-        "cv_file": "data/cv_frontend.txt",
-    },
-    "fullstack": {
-        "keywords": [
-            "fullstack engineer",
-            "full stack developer",
-            "backend developer",
-            "nodejs developer",
-            "typescript backend",
-            "python backend",
-            "fastapi developer",
-        ],
-        "cv_file": "data/cv_fullstack.txt",
-    },
-}
+# The person's own search setup lives in the gitignored _profile.yml (copy
+# _profile.example.yml): job types map search keywords to the CV used for
+# them, and Indeed passes say which countries to scan.
+_PROFILE_PATH = Path(__file__).resolve().parent / "_profile.yml"
+_PROFILE = (
+    yaml.safe_load(_PROFILE_PATH.read_text()) or {} if _PROFILE_PATH.exists() else {}
+)
+
+JOB_TYPES = _PROFILE.get("job_types") or {}
+
+# (country, results_wanted, remote_only). Indeed is per-country — there is no
+# worldwide domain, and country_indeed="worldwide" returns nothing, so "the
+# whole market" is spelled out as the countries that actually post remote
+# roles. Your own country usually goes in with remote_only false: onsite and
+# hybrid there are real options.
+INDEED_PASSES = [tuple(p) for p in _PROFILE.get("indeed_passes") or [
+    ("usa", 20, True),
+    ("uk", 15, True),
+    ("canada", 10, True),
+]]
 
 # Flatten all keywords for scraping
 SEARCH_KEYWORDS = []

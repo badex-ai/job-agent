@@ -14,10 +14,16 @@ gates only encode markers that are unambiguous on sight:
 
 Deliberately NOT gated here (Qwen's job, needs context):
     - "right to work" / "work authorization" — appears in benign boilerplate
-    - onsite outside the candidate's country — soft skip, relocation is conditional
+    - onsite outside the candidate's country — soft skip when relocation is
+      conditional
     - country-restricted remote ("LATAM only") — phrased a hundred ways
-    - salary below the floor — needs real parsing, not worth a brittle regex
+    - salary below the profile's floor — needs real parsing, not worth a
+      brittle regex
     - stack/role mismatch — pure judgment
+
+Which gates run is set by `hard_gates:` in shared/config/_profile.yml (all
+four when the profile or the key is missing). A candidate based in India
+would drop `india` and `inr_salary`, for example.
 
 A gate firing on a job the user labeled APPLY or CONSIDER is a bug in the
 gate, never in the label. Audit mode checks exactly that:
@@ -26,6 +32,13 @@ gate, never in the label. Audit mode checks exactly that:
 """
 
 import re
+from functools import cache
+from pathlib import Path
+
+import yaml
+
+PROFILE_PATH = Path(__file__).resolve().parent.parent / "shared" / "config" / "_profile.yml"
+ALL_GATES = ("india", "inr_salary", "unpaid", "no_sponsorship")
 
 INDIA_LOC_RE = re.compile(
     r"\b(india|bengaluru|bangalore|hyderabad|mumbai|pune|chennai|"
@@ -44,21 +57,36 @@ NO_SPONSOR_RE = re.compile(
     r"(?:u\.?s\.?\s+)?citizens?\s+only|security\s+clearance|no\s+visa\b", re.I)
 
 
-def fired_gates(job: dict) -> list[str]:
+@cache
+def enabled_gates(profile_path: Path = PROFILE_PATH) -> frozenset[str]:
+    """Gates switched on in the profile; all of them if it says nothing."""
+    if not profile_path.exists():
+        return frozenset(ALL_GATES)
+    gates = (yaml.safe_load(profile_path.read_text()) or {}).get("hard_gates")
+    if gates is None:
+        return frozenset(ALL_GATES)
+    unknown = set(gates) - set(ALL_GATES)
+    if unknown:
+        raise ValueError(f"unknown hard_gates in {profile_path}: {sorted(unknown)}")
+    return frozenset(gates)
+
+
+def fired_gates(job: dict, enabled: frozenset[str] | None = None) -> list[str]:
     """Return the list of gate names that fire for a job.
 
     `job` needs `location`, `title`, `description` (labels.json schema or
     the production scraper's row — same field names).
     """
+    on = enabled_gates() if enabled is None else enabled
     text = f"{job.get('title', '')}\n{job.get('description', '')}"
     fired = []
-    if INDIA_LOC_RE.search(job.get("location", "")):
+    if "india" in on and INDIA_LOC_RE.search(job.get("location", "")):
         fired.append("india")
-    if INR_SALARY_RE.search(text):
+    if "inr_salary" in on and INR_SALARY_RE.search(text):
         fired.append("inr_salary")
-    if UNPAID_RE.search(text):
+    if "unpaid" in on and UNPAID_RE.search(text):
         fired.append("unpaid")
-    if NO_SPONSOR_RE.search(text):
+    if "no_sponsorship" in on and NO_SPONSOR_RE.search(text):
         fired.append("no_sponsorship")
     return fired
 

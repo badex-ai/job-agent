@@ -461,7 +461,7 @@ def test_s1_guard_keeps_based_locally_in_exclusion():
 def test_s1_guard_still_downgrades_bare_place_after_extension():
     # guard the tripwire: the non-English/verb additions must NOT make a bare
     # place mention count as an exclusion. This is the FN->FP oscillation the
-    # the design notes lesson warns has no equilibrium — proving it stays inert.
+    # earlier rounds showed has no equilibrium — proving it stays inert.
     reasoning = "Disqualifying rule: S1.\nEvidence: 'Lima, Perú'"
     desc = "Backend Developer. Our office is in Lima, Perú. Fully remote worldwide."
     eff, why = eval_gate.verify_evidence("skip", reasoning, desc, tags=["S1"])
@@ -469,7 +469,7 @@ def test_s1_guard_still_downgrades_bare_place_after_extension():
 
 
 def test_s1_guard_downgrades_bare_residentes():
-    # regression (review, 2026-07-08): the Spanish arm must be
+    # regression (2026-07-08): the Spanish arm must be
     # noun+preposition ('residentes de/en'), NOT the bare noun 'residentes',
     # which matched benign inclusions ('residentes y no residentes bienvenidos')
     # and non-eligibility domains ('app para médicos residentes'). A bare
@@ -516,7 +516,7 @@ def test_fabricated_quote_does_not_count_as_caught_skip():
     assert m["n_false_negatives"] == 1
 
 
-# --- rescore: single-run/dual-score (review finding 2026-07-08) --------
+# --- rescore: single-run/dual-score (2026-07-08) ---------------------------
 
 def test_rescore_reproduces_a_live_run_exactly():
     # THE INVARIANT: re-scoring a saved run under the SAME guard must reproduce
@@ -568,7 +568,7 @@ def test_rescore_fails_loudly_on_id_mismatch():
         eval_gate.rescore(prior, make_jobs([("A", "SKIP")]))  # id 0, not 999
 
 
-# --- eligibility-only re-scope (review 2026-07-14) ---------------
+# --- eligibility-only re-scope (2026-07-14) --------------------------------
 # The gate stops adjudicating stack/role TASTE (S2): a skip whose only basis is
 # S2 is demoted to surface for the human. S3 is NOT demoted (17/17 on held-out).
 
@@ -663,9 +663,19 @@ def test_stub_transport_surfaces_clean_job():
 
 # --- CLI smoke (offline, via stub) -----------------------------------------
 
-def test_main_stub_writes_valid_json(tmp_path):
+def test_main_stub_writes_valid_json(tmp_path, monkeypatch):
+    # the stub never reads the prompt; keep the test free of a personal profile
+    monkeypatch.setattr(eval_gate, "build_system_prompt", lambda: "stub prompt")
+    labels = tmp_path / "labels.json"
+    labels.write_text(json.dumps([
+        {"id": str(i), "title": f"Role {i}", "company": "Acme",
+         "location": "Remote", "description": "Backend role, remote.",
+         "label": label, "notes": ""}
+        for i, label in enumerate(["APPLY", "CONSIDER", "HOLD", "SKIP", "SKIP"])
+    ]))
     out = tmp_path / "r.json"
-    rc = eval_gate.main(["--stub-model", "--limit", "5", "--out", str(out)])
+    rc = eval_gate.main(["--stub-model", "--labels", str(labels),
+                         "--limit", "5", "--out", str(out)])
     assert rc == 0
     data = json.loads(out.read_text())
     for key in ("n", "skip_recall", "false_negatives"):
