@@ -29,7 +29,7 @@ DUP_JACCARD = 0.65
 # Dedup only fires when the last sighting of a matching role was within this many
 # days: LinkedIn re-spams the SAME posting within days, but a role genuinely
 # RE-OPENED months later is a fresh chance to apply and must NOT be buried (the
-# expensive FP under the design notes). The window is measured since the role was
+# expensive error when a human applies after the gate). The window is measured since the role was
 # LAST seen and refreshed on every merge, so a continuously-spammed post stays
 # deduped and a role only re-surfaces after a real gap of silence.
 DUP_WINDOW_DAYS = 30

@@ -14,7 +14,7 @@ Verdict -> label alignment (grounded in rubric.md sec 0):
 Anchor metric: SKIP recall + precision (does the gate catch the jobs the
 user would skip, without over-skipping the act-set?).
 
-False negative (the quiet, dangerous error, per the design notes):
+False negative (the quiet, dangerous error):
   a job the user labeled SKIP that the gate let through (surface*). These
   waste an application slot. The full list is emitted for inspection.
 
@@ -205,8 +205,8 @@ def verify_evidence(
     return verdict, None
 
 
-# The stack/role TASTE rules the gate is measurably unreliable on (the design notes
-# §9.3; review 2026-07-14). S2 ("primary stack the candidate doesn't work in")
+# The stack/role TASTE rules the gate is measurably unreliable on (measured
+# 2026-06-21, re-scoped 2026-07-14). S2 ("primary stack the candidate doesn't work in")
 # fires on OR-lists and on the candidate's own languages — a coin-flip. With a
 # HUMAN filter after the gate (manual apply, auto-send off), burying a good job
 # (FP) is the expensive error and a leaked skip (FN) is cheap. So when
@@ -221,7 +221,7 @@ ELIGIBILITY_RULES = {"S1", "S3", "S4", "S5", "S6"}
 
 def apply_scope(verdict: str, tags: list[str] | None,
                 *, eligibility_only: bool) -> tuple[str, str | None]:
-    """Eligibility-only re-scope (review 2026-07-14). Client-side,
+    """Eligibility-only re-scope (2026-07-14). Client-side,
     tag-keyed: when `eligibility_only` is True, demote a skip whose SOLE basis is
     a taste rule (S2) to `surface` — the gate stops adjudicating stack/role fit
     and hands it to the human + ensemble. A skip that also cites any eligibility
@@ -466,7 +466,7 @@ def rescore(prior: dict, jobs: list[dict], eligibility_only=False) -> dict:
     verify_evidence (i.e. the current S1_EXCLUSION_RE) and — when
     `eligibility_only` is set — the eligibility-only re-scope, with no M4 call.
 
-    The point (review finding, 2026-07-08): a guard/regex change, and the
+    The point (found in review, 2026-07-08): a guard/regex change, and the
     eligibility-only re-scope (2026-07-14), are pure client-side post-processing
     of the model's `raw_verdict` + `reasoning` + `tags`. The model request is
     byte-identical, so a saved run can be scored under a NEW guard/scope offline
@@ -612,7 +612,7 @@ def main(argv=None):
                     action="store_true",
                     help="eligibility-only re-scope: demote a skip whose ONLY "
                          "basis is a taste rule (S2) to surface — the human "
-                         "decides stack/role fit (the design notes is amended for "
+                         "decides stack/role fit (FN priority is relaxed for "
                          "the manual-apply workflow). Tag-keyed post-processing, "
                          "so it composes with --rescore to judge the re-scope "
                          "OFFLINE against a saved run (no M4 heat).")

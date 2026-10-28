@@ -1133,7 +1133,7 @@ function jobCard(job, bucket) {
   //   APPLY / CONSIDER : Apply · Dismiss · Hold
   //   SKIP             : Apply · Hold  — SKIP is the rescue view for gate
   //     false-positives (a buried good job), which under the manual-apply
-  //     workflow is the EXPENSIVE error (the design notes). So a skipped job
+  //     workflow is the EXPENSIVE error. So a skipped job
   //     MUST be actionable — you can apply to it or park it. Dismiss is omitted:
   //     the gate already skipped it, so "dismiss" adds nothing.
   //   HOLD             : Apply · Dismiss · Restore (send it back to its bucket)

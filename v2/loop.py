@@ -3,7 +3,7 @@
 
 The v1 RAPH loop with its one weak organ replaced. v1 scored jobs with an
 unmeasured cv_matcher/overall_score; this loop scores them with the measured
-Qwen gate (the design notes) and writes the verdict onto the row.
+Qwen gate and writes the verdict onto the row.
 
 What it reuses from the working v1 system, unchanged:
   - shared.scraper.job_scraper.run_scrape   (the scraper)

@@ -3,8 +3,8 @@
 
 Why this exists: the 200 labels in data/labels.json are training-contaminated.
 Every rubric tweak was fit to them, so a number measured on them no longer
-proves an improvement (the design notes: "a change is only better if it improves
-the number on held-out labels the prompt wasn't tuned against"). This script
+proves an improvement (a change is only better if it improves the number on
+held-out labels the prompt wasn't tuned against). This script
 reserves a clean test set from the 1775 jobs that were never hand-labeled.
 
 Two sets, each doing exactly one job — see the reasoning logged with the plan:

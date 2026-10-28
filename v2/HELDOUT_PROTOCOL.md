@@ -4,7 +4,7 @@
 before the eligibility-only re-scope is built.** Its purpose is to fix the
 scoring function, the baseline, and the pass/fail rule in advance, so the
 result of the re-scope cannot be rationalized after the numbers come in. This
-is the discipline that was missing the first time (the design notes: a change is
+is the discipline that was missing the first time (a change is
 only "better" if it improves a number on held-out labels the prompt wasn't
 tuned against — and the 200 are now all tuning data).
 
@@ -100,7 +100,7 @@ If both hold → ship the re-scope and record HEADLINE FP/FN as the new honest
 baseline. If FP drops but FN rises ≥2 → the re-scope trades the dangerous error
 for the cheap one; do NOT ship as-is, investigate which S-rule leaked. If FP
 does not drop → the FP was not where we thought; the re-scope is a no-op and the
-diagnosis in the design notes is wrong — reopen it.
+diagnosis behind the re-scope is wrong — reopen it.
 
 **STRESS set is read second, only to explain the headline**, never to override
 it: it shows *which* S2/S3 cases moved. A re-scope that passes on HEADLINE but

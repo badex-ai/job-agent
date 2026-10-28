@@ -5,7 +5,7 @@ append-only `Application` log over the immutable gate verdict — a job's curren
 UI state is the LATEST application row for it (by id), never a mutation of the
 Job row's gate_* columns.
 
-The one asymmetry (reviewed): APPLY dual-writes. It appends an `applied`
+The one asymmetry: APPLY dual-writes. It appends an `applied`
 row AND calls the canonical `tracking.mark_applied`, because the CLI's
 double-apply guard and stats read Job.applied / Job.status — skipping that would
 fork "did I apply?" between the CLI and the web UI. The two writes share ONE

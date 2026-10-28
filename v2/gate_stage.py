@@ -4,7 +4,7 @@
 This is the SAME gate the eval harness validated, shaped for the loop. It
 layers exactly as v2/eval_gate.py does, so production judgment cannot drift
 from the measured numbers (the guard-version confound of 2026-06-16 is the
-reason this reuse is non-negotiable — see the design notes):
+reason this reuse is non-negotiable):
 
   1. hard_gates.hard_skip  — deterministic, 0-token safety net. A free skip
      on an unambiguous marker (India / ₹ / unpaid / no-sponsorship) avoids an
@@ -36,7 +36,7 @@ from v2.hard_gates import hard_skip
 from v2.qwen_gate import GateError, gate_job
 from v2.eval_gate import verify_evidence
 
-# The chosen substrate (the design notes). The eval default is still 7b for
+# The chosen substrate (14b beat 7b on a clean comparison). The eval default is still 7b for
 # back-compat; production pins 14b explicitly so a stale default can never
 # silently downgrade the live gate.
 GATE_MODEL = "qwen2.5:14b"

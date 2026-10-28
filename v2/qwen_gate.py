@@ -1,8 +1,8 @@
 """Qwen eligibility-gate client (v2 Phase 4, T1).
 
 Sends one job to Qwen via Ollama /api/generate and returns a structured
-verdict. Settings follow the design notes (verified against
-https://github.com/ollama/ollama/blob/main/docs/api.md):
+verdict. Settings are verified against the Ollama API docs
+(https://github.com/ollama/ollama/blob/main/docs/api.md):
 
 - temperature 0, seed 11, num_ctx 8192 — deterministic, no silent truncation
 - keep_alive "5m", stream false, format = full JSON Schema

@@ -1,7 +1,7 @@
 # SPEC — v2 Apply/Triage CLI (the gate's labeling front-end)
 
 **Status:** locked 2026-06-21.
-**Authority:** this spec serves the design notes and `v2/rubric.md`; if they
+**Authority:** this spec serves the labels and `v2/rubric.md`; if they
 disagree with a line here, they win and this file is updated.
 
 ---
@@ -16,15 +16,14 @@ training set used to re-derive the rubric over time.
 It is **two things at once**, and the second is the load-bearing one:
 1. a fast triage + application-tracking tool (the obvious job), and
 2. **a continuous labeling instrument** — the source of the next batch of
-   ground truth that improves the frozen 67%-agreement gate (the design notes
-   §6/§9.3). Triage is the vehicle; the labels are the point.
+   ground truth that improves the frozen 67%-agreement gate. Triage is the vehicle; the labels are the point.
 
 ---
 
 ## 1. Why this exists
 
 - The Qwen gate is **frozen at qwen2.5:14b**, action-agreement ~67%, FN 18 /
-  FP 35 on the 200 labels (the design notes). It is **not** trusted for
+  FP 35 on the 200 labels. It is **not** trusted for
   autonomous apply — human review is mandatory.
 - Model size is exhausted: **32b is off the table** (M4 can't run it). The only
   live improvement lever is **better labels → re-derived rubric + few-shot

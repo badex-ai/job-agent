@@ -109,7 +109,6 @@ def mark_status(job_id: str, new_status: str):
 # ── Sidebar ──────────────────────────────────────────────────────
 with st.sidebar:
     st.markdown("## ⚡ Job Agent")
-    st.markdown("Remote job search")
     st.markdown("---")
 
     min_score = st.slider("Min Match Score", 0, 100, 60)

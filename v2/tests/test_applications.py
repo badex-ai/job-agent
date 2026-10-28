@@ -82,7 +82,7 @@ def test_apply_returns_dict_row(session):
 
 
 def test_apply_dual_writes_job_applied_flag(session):
-    # The Review-flagged invariant: Apply must mark_applied so the CLI's
+    # The invariant: Apply must mark_applied so the CLI's
     # double-apply guard (Job.applied) stays in sync with the web UI.
     app.apply_to_job("j1", session=session)
     job = session.query(Job).filter(Job.id == "j1").one()
@@ -225,7 +225,7 @@ def test_status_change_carries_cv_forward(session):
 
 
 def test_status_change_no_longer_wipes_the_note(session):
-    # Review-flagged bug fixed: set_status used to re-append with note=None,
+    # Bug fixed: set_status used to re-append with note=None,
     # silently erasing the displayed note on the first lifecycle change.
     app.apply_to_job("j1", note="sent Tuesday", cv="cv_devops", session=session)
     app.set_status("j1", "interview", session=session)
